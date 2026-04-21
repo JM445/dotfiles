@@ -2,3 +2,4 @@ flake.nix
 flake.lock
 .direnv
 .envrc
+**/application-dev.properties
