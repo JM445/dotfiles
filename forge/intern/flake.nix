@@ -50,8 +50,8 @@
               # Set JAVA_HOME for tools that need it
               export JAVA_HOME="${pkgs.jdk21}"
 
-              # Ensure Docker is accessible (if using Docker daemon socket)
-              export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
+              # # Ensure Docker is accessible (if using Docker daemon socket)
+              # export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
               '';
           };
         }
