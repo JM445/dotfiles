@@ -12,8 +12,8 @@
         devShell = pkgs.mkShell {
           packages = [
             # JavaScript / Node.js
-            pkgs.nodejs_20               # Node.js 20 LTS
-            pkgs.nodePackages.pnpm       # pnpm v9 package manager
+            pkgs.nodejs_26               # Node.js 26
+            pkgs.pnpm       # pnpm v9 package manager
 
             # Build tooling
             pkgs.typescript              # tsc for type checking
