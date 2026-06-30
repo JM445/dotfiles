@@ -6,7 +6,11 @@
 
   outputs = { self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem(system:
-        let pkgs = import nixpkgs { inherit system; };
+        let
+          pkgs = import nixpkgs { inherit system; };
+          lsWithColor = pkgs.writeShellScriptBin "ls" ''
+            exec ${pkgs.coreutils}/bin/ls --color=auto "$@"
+          '';
         in
         {
           devShell = pkgs.mkShell {
@@ -30,7 +34,7 @@
               # Optional
               pkgs.which                    # Utility to locate programs
               pkgs.gnumake                  # Build automation (if needed)
-            ];
+            ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ lsWithColor ];
 
             shellHook = ''
               echo "🚀 Forge::dev Development Environment"
@@ -49,6 +53,7 @@
 
               # Set JAVA_HOME for tools that need it
               export JAVA_HOME="${pkgs.jdk21}"
+
 
               # # Ensure Docker is accessible (if using Docker daemon socket)
               # export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"

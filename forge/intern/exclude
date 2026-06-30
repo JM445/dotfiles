@@ -3,3 +3,5 @@ flake.lock
 .direnv
 .envrc
 **/application-dev.properties
+.claude
+LocalDocs

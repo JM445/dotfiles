@@ -13,4 +13,14 @@ fi
 
 ln -s $SCRIPT_DIR/exclude ./.git/info/exclude
 
+if [[ -d ./LocalDocs && ! -L ./LocalDocs ]]; then
+    rm -rf ./LocalDocs
+    echo "Removed existing LocalDocs directory"
+fi
+
+if [[ ! -e ./LocalDocs ]]; then
+    ln -s $SCRIPT_DIR/LocalDocs ./LocalDocs
+    echo "Linked LocalDocs"
+fi
+
 echo "Done"
