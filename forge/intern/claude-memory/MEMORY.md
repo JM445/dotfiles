@@ -3,3 +3,5 @@
 - [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: ingestion testing done, 11/11 tests passing, bugs fixed
 - [Testcontainers Docker API fix](project_testcontainers_docker_api_version.md) — JDK_JAVA_OPTIONS="-Dapi.version=1.41" needed for @QuarkusTest devservices on this machine
 - [Hibernate persist-ordering gotcha](project_hibernate_persist_ordering_gotcha.md) — set fields before persist(); EntityManager L1 cache spans @Transactional calls in one test
+- [Maven build-cache gotcha](project_maven_build_cache_gotcha.md) — stale cache after pom.xml edits breaks install/test; fix with -Dmaven.build.cache.skipCache=true
+- [Claude memory flake link](project_claude_memory_flake_link.md) — autoMemoryDirectory setup via link.sh; rerun linker.sh if it ever points at /nix/store again

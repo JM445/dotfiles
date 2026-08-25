@@ -59,19 +59,11 @@
               # so this needs JDK_JAVA_OPTIONS rather than MAVEN_OPTS)
               export JDK_JAVA_OPTIONS="-Dapi.version=1.41"
 
-              # Route this repo's Claude Code auto-memory into this flake's own
-              # (git-synced) directory instead of the per-machine default, so it
-              # follows the dotfiles repo across hosts. `self` resolves to wherever
-              # this flake.nix actually lives on the current host, so no path is
-              # hardcoded here.
-              CLAUDE_MEMORY_DIR="${self}/claude-memory"
-              mkdir -p "$CLAUDE_MEMORY_DIR" .claude
-              cat > .claude/settings.local.json <<SETTINGS
-{
-  "autoMemoryDirectory": "$CLAUDE_MEMORY_DIR"
-}
-SETTINGS
-
+              # Claude Code auto-memory setup (autoMemoryDirectory in
+              # .claude/settings.local.json) is handled by link.sh, not here:
+              # `self` in a flake shellHook resolves to the read-only Nix store
+              # copy of this flake's source, never the live git checkout, so it
+              # can't be used to point at a writable, git-synced directory.
 
               # # Ensure Docker is accessible (if using Docker daemon socket)
               # export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
