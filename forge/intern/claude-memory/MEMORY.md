@@ -1,0 +1,5 @@
+- [Staging DB access](staging_db_access.md) — kube-switcher `switch` for context + `-n <namespace>` needed for kubectl port-forward
+- [Confirm before editing](feedback_confirm_edits.md) — ask before any file edits in this repo, even in auto-mode
+- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: ingestion testing done, 11/11 tests passing, bugs fixed
+- [Testcontainers Docker API fix](project_testcontainers_docker_api_version.md) — JDK_JAVA_OPTIONS="-Dapi.version=1.41" needed for @QuarkusTest devservices on this machine
+- [Hibernate persist-ordering gotcha](project_hibernate_persist_ordering_gotcha.md) — set fields before persist(); EntityManager L1 cache spans @Transactional calls in one test

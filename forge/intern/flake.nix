@@ -37,6 +37,7 @@
             ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ lsWithColor ];
 
             shellHook = ''
+              nix build nixpkgs#openjdk -o ~/.local/lib/openjdk
               echo "🚀 Forge::dev Development Environment"
               echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
               echo "Java:    $(java -version 2>&1 | head -n 1)"
@@ -53,6 +54,23 @@
 
               # Set JAVA_HOME for tools that need it
               export JAVA_HOME="${pkgs.jdk21}"
+
+              # Force Docker api version (must reach the Surefire-forked JVM too,
+              # so this needs JDK_JAVA_OPTIONS rather than MAVEN_OPTS)
+              export JDK_JAVA_OPTIONS="-Dapi.version=1.41"
+
+              # Route this repo's Claude Code auto-memory into this flake's own
+              # (git-synced) directory instead of the per-machine default, so it
+              # follows the dotfiles repo across hosts. `self` resolves to wherever
+              # this flake.nix actually lives on the current host, so no path is
+              # hardcoded here.
+              CLAUDE_MEMORY_DIR="${self}/claude-memory"
+              mkdir -p "$CLAUDE_MEMORY_DIR" .claude
+              cat > .claude/settings.local.json <<SETTINGS
+{
+  "autoMemoryDirectory": "$CLAUDE_MEMORY_DIR"
+}
+SETTINGS
 
 
               # # Ensure Docker is accessible (if using Docker daemon socket)
