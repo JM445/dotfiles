@@ -125,13 +125,13 @@ NodeReference (sealed)
 
 ### DiscoveredTest
 
-Tests are not predefined - they are discovered from JUnit XML results produced by MaaS workers. The app listens to `JobResultUploaded` events and upserts entries as new tests appear.
+Tests are not predefined - they are discovered from JUnit XML results produced by MaaS workers. Discovery happens synchronously at `SubmissionAggregate` ingestion: for each `Job` with status `RESULT_UPLOADED`, the trace at `traceUrl` is fetched and parsed, and one `DiscoveredTest` is upserted per distinct `(classname, testKey)` found. Re-ingestion of a retried job (same `Job.id`, new `traceUrl`) naturally re-triggers parsing, so no separate retry-detection mechanism is needed.
 
 ```
 DiscoveredTest
   id:              UUID
   activityUri:     String
-  assignmentSlug:  String
+  assignmentUri:   String
   classname:       String    // <testcase classname="...">
   testKey:         String    // <testcase name="...">
   firstSeenAt:     Instant
@@ -139,11 +139,29 @@ DiscoveredTest
   occurrenceCount: int
 ```
 
-Natural composite key: `(activityUri, assignmentSlug, classname, testKey)`.
+Natural (unique) key: `(assignmentUri, classname, testKey)` — `activityUri` is deliberately excluded from it, since URIs on this intranet are globally unique strings built by concatenating parent URIs (`assignmentUri` already embeds its owning `activityUri`), so including `activityUri` in the key would add no actual uniqueness guarantee. It's kept as a plain, non-key column purely for activity-wide queries (an `Exam` spans multiple assignments under one `activityUri`; without this column, listing every discovered test across the whole exam would require first enumerating all of its assignment URIs). Both URI fields are stored verbatim (no parsing) — they're already available as-is on the loaded `SubmissionDefinitionModel` at ingestion time.
 
 A teacher can only reference a test in a scheme after at least one submission has produced it. The scheme validator rejects `TestCaseRef` pointing to an unknown `discoveredTestId`.
 
 Many tests only appear in some submissions (cheat detection, compilation errors/warnings, etc.) - this is expected. The `absenceBehavior` on the node handles the semantic for each case.
+
+`DiscoveredTest` is a dimension/catalog table, not a duplicate of `TestResult` below: it answers "does this test conceptually exist for this activity", independent of any one submission's outcome, and it is what `GradingNode.reference` (`TestCaseRef`) points to. Keeping it separate (rather than deriving the set of known tests live from `TestResult`) matters for two reasons: it stays resolvable even if older `TestResult` rows are later archived/pruned for space, and `firstSeenAt`/`lastSeenAt`/`occurrenceCount` are cheap reads for the scheme-authoring UI instead of a live aggregate over a potentially huge result table.
+
+### TestResult
+
+The actual per-submission outcome for one discovered test - persisted at ingestion time (see above), not re-derived from S3 traces at grade-computation time. One row per `(Job, DiscoveredTest)`.
+
+```
+TestResult
+  id:             UUID
+  discoveredTest: DiscoveredTest   // FK - test identity lives here, not duplicated as classname/testKey strings
+  jobId:          UUID
+  submissionId:   UUID
+  success:        boolean
+  failMessage:    String?
+```
+
+Storing all results at ingestion time (rather than re-parsing traces on every grade computation/recomputation) trades DB storage growth for: fast, repeatable grade computation that doesn't depend on S3 trace objects still existing or being reachable at compute time, and no repeated S3 load when a teacher recomputes a scheme multiple times while iterating on it.
 
 ### GradeReport
 
@@ -198,7 +216,7 @@ Bottom-up (leaves first):
 
 1. If no data exists for this node, apply `absenceBehavior`. If `IGNORE`, exclude from parent and stop.
 2. If `ignored` is set, exclude from parent and stop.
-3. For leaf nodes: read score from JUnit data (`traceStats` in `SubmissionAggregate.Job`).
+3. For leaf nodes: read the `TestResult` row for `(submission, discoveredTest)` referenced by the node's `TestCaseRef`.
 4. For non-leaf nodes: apply `aggregation` rule over non-excluded children.
 5. Compute `effectiveMax` as the sum of `points` of non-excluded children.
 6. Compute `validated`: `score / effectiveMax >= validationThreshold`.
