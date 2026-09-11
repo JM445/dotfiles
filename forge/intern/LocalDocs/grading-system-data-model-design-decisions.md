@@ -86,7 +86,7 @@ Note that `score` and `validated` are separate things - a node can score non-zer
 
 ### Flags
 
-`mandatory` - if this node is not validated, the parent's score is forced to 0 regardless of other children. Evaluated after all children are scored.
+`mandatory` - if this node is not validated, the parent won't be validated, regardless of other children. Evaluated after all children are scored.
 
 `ignored` - this node and its entire subtree are excluded from computation. Takes priority over everything else, including `mandatory` (a node cannot be both). The scheme validator should reject that combination.
 
