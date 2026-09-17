@@ -1,6 +1,6 @@
 - [Staging DB access](staging_db_access.md) — kube-switcher `switch` for context + `-n <namespace>` needed for kubectl port-forward
 - [Confirm before editing](feedback_confirm_edits.md) — ask before any file edits in this repo, even in auto-mode
-- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: grade computation WIP, model changes planned for Monday, read the design doc first
+- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: ratio-based grade computation implemented & tested; read the two LocalDocs design docs first; `effectiveMax` for MIN/MAX is the open question
 - [framework-trace / S3 trace fetch](reference_framework_trace.md) — Xml.deserialize(_, Trace.class); job.traceUrl is a raw S3 key, use as-is
 - [Intranet URI/slug convention](reference_intranet_uri_convention.md) — URIs globally unique, built from parent URI + slug; don't double-key on both
 - [Testcontainers Docker API fix](project_testcontainers_docker_api_version.md) — JDK_JAVA_OPTIONS="-Dapi.version=1.41" needed for @QuarkusTest devservices on this machine

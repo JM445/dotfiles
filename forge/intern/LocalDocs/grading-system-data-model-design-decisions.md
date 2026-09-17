@@ -34,6 +34,12 @@ GradingScheme
   root:        GradingNode  // synthetic root node at activity level
 ```
 
+`root` is a stored FK (`grading_scheme.root_node_id`). Nodes keep their own `scheme` reference as well, so that
+scheme-wide flat queries (validation, listing every node of a scheme) don't have to walk the tree. That makes the
+two FKs circular, which is fine as long as `root_node_id` is nullable: Hibernate inserts the scheme, cascades the
+tree, then updates the pointer. A partial unique index on `grading_node (scheme_id) WHERE parent_id IS NULL`
+guarantees a scheme has exactly one parentless node.
+
 ### GradingNode
 
 A node in the grading tree. The tree always follows this hierarchy:
@@ -49,44 +55,93 @@ Activity root
 ```
 GradingNode
   id:                  UUID
+  scheme:              GradingScheme        // owning scheme, kept on every node for flat queries
   label:               String
   reference:           NodeReference
-  points:              double               // contribution to parent's effective max
+  points:              double               // the node's own maximum, static across all students
   validationThreshold: double               // fraction [0.0 -> 1.0]; default 1.0 for test cases
   mandatory:           boolean
   ignored:             boolean
   absenceBehavior:     AbsenceBehavior
   aggregation:         AggregationRule
+  adjustment:          GradeAdjustment?     // non-null marks a bonus/malus node
   children:            List<GradingNode>
 ```
 
 ### points
 
-Each node has a `points` value representing its contribution to the parent's effective max. There is no percentage-based weight type - equal distribution is a frontend concern (a button that sets all siblings to `parentEffectiveMax / siblingCount`).
+`points` is the node's **own maximum**, and it is static: it is declared on the scheme and is the same for every
+student. This is the central constraint of the whole model - two students must never be graded against different
+maxima for the same node, or their grades cannot be compared or justified when one of them objects.
 
-The parent's effective max is always derived from its children:
-
-```
-effectiveMax(node) = sum of points for all non-ignored, non-absent-IGNORE children
-```
-
-It is never stored on the parent node, which avoids any inconsistency between a declared max and what the children actually sum to.
+There is no percentage-based weight type - equal distribution is a frontend concern (a button that sets all siblings
+to `parentPoints / siblingCount`).
 
 > TODO: floating point - still undecided between rounding stored values, accepting slight drift, or storing integers scaled up (x1000 or x10000).
+
+### Scoring
+
+Every node produces a **ratio** in `[0.0 -> 1.0]`, and:
+
+```
+score(node) = node.points x ratio(node)
+```
+
+The aggregation rule only decides how a node's ratio is derived from its children. Scale enters in exactly one place,
+and `score` is always bounded by the node's static `points`.
+
+Leaves are the base case: ratio is `1.0` when the test passed, `0.0` when it failed.
+
+A node is **excluded** when it is `ignored`, when it is absent with an `IGNORE` behavior, or when it carries an
+`adjustment` (see below). Excluded nodes take no part in their parent's ratio. A non-leaf with no non-excluded child
+is itself excluded - which is what keeps a ratio from ever being computed over an empty set.
+
+Because each node's ratio is computed only over the children that were actually assessable, an excluded child neither
+rewards nor penalises the student: the remaining children simply carry the node's full `points`.
 
 ### validationThreshold
 
 ```
-validated = (score / effectiveMax) >= validationThreshold
+validated = ratio >= validationThreshold
 ```
 
-Defaults to `1.0` for test cases (JUnit tests are binary). Configurable for higher levels (e.g. 0.5 means "at least half the points").
+Only applied to aggregating nodes. Test cases are binary and take `validated` straight from the test outcome: running
+the fraction on them would make a test case worth 0 point come out validated, which would let it slip past the
+mandatory check below. The scheme validator should reject a `validationThreshold` other than `1.0` on a test case,
+since it is silently unused there.
+
+Configurable for higher levels (e.g. 0.5 means "at least half the points").
+
+### effectiveMax
+
+```
+effectiveMax(node) = node.points x (sum of points of non-excluded children / sum of points of all children)
+```
+
+`effectiveMax` is **audit data only**. It drives nothing - not the score, not `validated` - and exists to answer a
+single question: "how much of this node was actually assessable for this student?" A student who sees a score out of
+ten with four of the ten test cases ignored needs that recorded somewhere, or the grade cannot be justified.
+
+It is deliberately kept out of score computation because it is **dynamic**: it shrinks per student as things are
+ignored or absent. Letting it into the score would break the static-maximum rule above.
+
+At a leaf it is `points`, or `0` when the leaf is excluded.
 
 Note that `score` and `validated` are separate things - a node can score non-zero but not be validated (below threshold), or score zero but be validated (absent + `PASS`). This is why `validated` is stored explicitly in `NodeResult` rather than derived from score alone.
 
 ### Flags
 
-`mandatory` - if this node is not validated, the parent won't be validated, regardless of other children. Evaluated after all children are scored.
+`mandatory` - a **global** invalidation flag: if any node carrying it is not validated, the whole report is invalid,
+wherever that node sits in the tree. It is deliberately decoupled from score aggregation - `validated` stays a purely
+local information and a mandatory failure never changes what a parent sums. Evaluated in a flat pass after the whole
+tree has been scored.
+
+This replaces an earlier per-parent propagation design (a mandatory child dragging down its direct parent). That
+version conflated two different features and made "how far up does the failure travel" ambiguous at every level; a
+single global check has no such ambiguity.
+
+The report carries the verdict on its root `NodeResult`: a global mandatory failure sets `validated = false` there and
+leaves every score untouched, so the computed grade stays honest and the flag is what says the report does not count.
 
 `ignored` - this node and its entire subtree are excluded from computation. Takes priority over everything else, including `mandatory` (a node cannot be both). The scheme validator should reject that combination.
 
@@ -96,18 +151,61 @@ Note that `score` and `validated` are separate things - a node can score non-zer
 * `PASS` : consider the node validated with full points (e.g. no cheat tests = no cheating detected)
 * `FAIL` : consider the node failed with 0 points
 
-Priority order when multiple flags apply: `ignored` > `absenceBehavior` > `mandatory` > normal scoring.
+Priority order when multiple flags apply: `ignored` > `absenceBehavior` > `mandatory` > normal scoring. A node left
+out of the computation cannot invalidate the report, whether it was excluded by its own `ignored` flag or because it
+was absent with an `IGNORE` behavior.
 
 
 ### AggregationRule
 
-| Rule | Behavior |
-|----|----|
-| `SUM` | Sum all children scores directly |
-| `WEIGHTED_AVERAGE` | Weighted average of children scores (weight = points), scaled to effectiveMax |
-| `MIN_CHILD` | Score equals the lowest child score (normalized) |
-| `MAX_CHILD` | Score equals the highest child score (normalized) |
+How a node derives its ratio, over its non-excluded children:
 
+| Rule | ratio |
+|----|----|
+| `SUM` | `sum(child.score) / sum(child.points)` - children weighted by their own points |
+| `AVERAGE` | mean of the children ratios, every child counting equally regardless of its points |
+| `MIN_CHILD` | `min(child ratio)` |
+| `MAX_CHILD` | `max(child ratio)` |
+
+`AVERAGE` replaces an earlier `WEIGHTED_AVERAGE` rule. A points-weighted average of the children ratios is
+`sum(child.ratio x child.points) / sum(child.points)`, which is exactly `sum(child.score) / sum(child.points)` - the
+same expression as `SUM`. The two rules were provably identical, so the useful distinction is the other one: `SUM`
+weights children by their points, `AVERAGE` gives every child the same weight no matter how many tests it contains.
+
+`MIN_CHILD`/`MAX_CHILD` compare **ratios**, never raw scores: a child worth 10 points scoring 3 must not count as
+better than a child worth 2 points scoring 2. Their intended use is several tests checking the same thing, where the
+teacher wants the worst (or best) attempt to decide.
+
+
+### Adjustments (bonus / malus)
+
+A node carrying a non-null `adjustment` is a bonus/malus node. It is **excluded from its parent's ratio** exactly like
+an ignored node, and is evaluated separately.
+
+```
+GradeAdjustment
+  kind:  BONUS | MALUS
+  ratio: double            // fraction [0.0 -> 1.0] of the scale it is applied to
+```
+
+The node resolves a test outcome like any other leaf. A `MALUS` fires when that test **fails**, a `BONUS` when it
+**passes**. An absent test never fires an adjustment, bonus or malus - which is exactly what makes the motivating case
+work with no extra machinery: a student with no trash files has no `TestResult` row for the trash-file test, so no
+malus fires.
+
+Adjustments are stored as a **ratio**, not as absolute points. Absolute points would only be meaningful at the root
+("-1 out of 20"), and applying the same adjustment at an interior node later would have no well-defined scale. A
+ratio generalises to any level. Entering a fixed point value is a frontend concern: it converts to a ratio against
+`finalMax` before saving, and may later offer a toggle between the two.
+
+**For now every adjustment applies to the final grade**, wherever its node sits in the tree. Node position is purely
+organisational - a trash-file malus can live under the assignment it belongs to - but has no effect on where the
+adjustment lands. Keeping them as tree nodes rather than a flat list on the scheme is what makes applying them at an
+arbitrary level a later change to *where the deduction lands* rather than a re-model.
+
+Because adjustment nodes are excluded, a node whose children are *all* adjustments has no non-excluded child and is
+therefore itself excluded, by the general rule. A "Penalties" grouping node holding only maluses is a natural way to
+author this and needs no special case.
 
 ### NodeReference
 
@@ -115,13 +213,19 @@ Typed discriminant linking a node to its intranet entity:
 
 ```
 NodeReference (sealed)
-  AssignmentGroupRef  { assignmentGroupSlug: String }
-  AssignmentRef       { assignmentSlug: String }
-  TestCategoryRef     { assignmentSlug: String, classname: String }
-  TestCaseRef         { discoveredTestId: UUID }
+  AssignmentGroupRef  { assignmentGroupUri: String }
+  AssignmentRef       { assignmentUri: String }
+  TestCategoryRef     { assignmentUri: String, classname: String }
+  TestCaseRef         { submissionDefUri: String, discoveredTestId: UUID }
 ```
 
-`TestCaseRef` references a `DiscoveredTest` by UUID to avoid dealing with the full composite key everywhere.
+All levels reference their intranet entity by URI, never by slug - URIs are the globally unique identifier here (see
+the `DiscoveredTest` key discussion below).
+
+`TestCaseRef` references a `DiscoveredTest` by UUID to avoid dealing with the full composite key everywhere. It still
+needs `submissionDefUri` alongside it: a `DiscoveredTest` is keyed on the *assignment*, and an assignment may declare
+several submission definitions, so the test identity alone does not say which submission definition a student is
+graded against - and resolving a student to a group, then to a picked submission, requires exactly that.
 
 ### DiscoveredTest
 
@@ -175,11 +279,23 @@ GradeReport
   studentId:     String
   activityUri:   String
   computedAt:    Instant
-  finalGrade:    double
+  finalGrade:    double     // pure tree computation, adjustments NOT included
   finalMax:      double     // copied from scheme at computation time
+  adjustmentTotal: double   // signed sum of every adjustment that fired
   status:        ReportStatus
   nodeResults:   Map<UUID, NodeResult>   // keyed by GradingNode.id
 ```
+
+`finalGrade` and `adjustmentTotal` are stored separately and `finalGrade` never includes the adjustments. They are
+combined only when the report is written out for teachers:
+
+```
+exportedGrade = clamp(finalGrade + adjustmentTotal, 0, finalMax)
+```
+
+Keeping them apart is the same transparency argument as `effectiveMax`: a student looking at 17/20 has to be able to
+see that it was 19 minus 2 for trash files. Note the clamp is applied at export only, so a report can legitimately
+record a `finalGrade + adjustmentTotal` above `finalMax` or below zero.
 
 ```
 enum ReportStatus { FRESH | STALE | COMPUTING | FAILED }
@@ -209,19 +325,32 @@ GradeOverride
   at:       Instant
 ```
 
+For an adjustment node, `score` records the signed amount that fired (negative for a malus, zero if it did not fire)
+and `effectiveMax` is `0`, since the node takes no part in its parent's ratio.
+
 ## Grade Computation Algorithm
 
-Bottom-up (leaves first):
+Bottom-up (leaves first). Every node produces a ratio, and `score = node.points x ratio`:
 
+1. If `ignored` is set, the node and its whole subtree are excluded. Stop.
+2. If the node carries an `adjustment`, it is excluded from its parent and evaluated separately. Stop.
+3. If no data exists for this node, apply `absenceBehavior`. If `IGNORE`, the node is excluded. Stop.
+4. Leaf nodes: read the `TestResult` row for the `DiscoveredTest` referenced by the node's `TestCaseRef`. ratio is
+   `1.0` on success, `0.0` on failure.
+5. Non-leaf nodes: derive the ratio from the non-excluded children with the node's `aggregation` rule. A node left
+   with no non-excluded child is itself excluded.
+6. `score = node.points x ratio`.
+7. `validated = ratio >= validationThreshold` for aggregating nodes, the test outcome itself for test cases.
+8. Record `effectiveMax` for audit.
 
-1. If no data exists for this node, apply `absenceBehavior`. If `IGNORE`, exclude from parent and stop.
-2. If `ignored` is set, exclude from parent and stop.
-3. For leaf nodes: read the `TestResult` row for `(submission, discoveredTest)` referenced by the node's `TestCaseRef`.
-4. For non-leaf nodes: apply `aggregation` rule over non-excluded children.
-5. Compute `effectiveMax` as the sum of `points` of non-excluded children.
-6. Compute `validated`: `score / effectiveMax >= validationThreshold`.
-7. If any mandatory child is not validated, force this node's score to 0.
-8. Bubble up score and points to parent.
+Then, once the whole tree is scored:
+
+1. **Mandatory pass**: if any non-excluded node flagged `mandatory` is not validated, set `validated = false` on the
+   root's `NodeResult`. Scores are not rewritten.
+2. `finalGrade = root.ratio x finalMax`.
+3. `adjustmentTotal` = the signed sum of every adjustment that fired, each as `±(adjustment.ratio x finalMax)`.
+
+`finalGrade` and `adjustmentTotal` are recorded separately; they are combined and clamped only at export time.
 
 ## Out of Scope (for now)
 
@@ -229,4 +358,20 @@ Bottom-up (leaves first):
 * YAML-defined grading schemes
 * Student-facing grade visibility (teacher-only for now, Auriga integration possible later)
 * Automatic recomputation on scheme change
-* Bonus points / grade caps
+* Applying a bonus/malus at an arbitrary level of the tree rather than to the final grade
+* Several distinct tests sharing one name inside a submission definition (see Assumptions)
+
+## Assumptions
+
+**Test names are unique within a submission definition.** Teachers are responsible for ensuring no two tests under the
+same submission definition share a name. Anything that would naturally produce one test per occurrence - one test per
+trash file, one per compilation warning - must instead be a single test listing the occurrences in its failure
+message, for the student's reference. The consequence is that a malus is the same for one trash file or ten.
+
+This is a deliberate simplification: a node that had to count a variable number of failing tests, discovered per
+student and unknown when the scheme is authored, needs machinery that nothing else in this model requires. It can be
+revisited, but not for a first implementation.
+
+## Related documents
+
+* `grading-system-scheme-validator.md` - the rules a grading scheme must satisfy before it can be used.
