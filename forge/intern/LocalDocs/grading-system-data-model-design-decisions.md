@@ -21,7 +21,15 @@ Exams and Projects only for now. Workshop grading is out of scope for the initia
 
 ### GradingScheme
 
-Configuration template for an activity's grading. Every modification increments the version rather than overwriting - existing reports keep a reference to the version they were computed against and are never silently invalidated. When a scheme changes, associated reports are marked `STALE` instead of deleted.
+Configuration template for an activity's grading. An activity has **exactly one** scheme (unique on `activityUri`),
+which is edited in place: every modification bumps `version` on the same row instead of creating a new one. Reports
+record the `schemeVersion` they were computed against, so a report whose version no longer matches the scheme's is
+stale by construction - nothing has to be updated on edit. The cost is history: a stale report's `nodeResults` may
+reference nodes that have since changed or been deleted, so its breakdown can no longer be shown against the tree it
+was computed from. Storing a snapshot of the tree in the report at computation time would close that gap; deferred.
+
+Several schemes per activity may be allowed later (e.g. a teacher trying alternative schemes). Anything keyed on the
+scheme rather than on the activity will survive that change.
 
 ```
 GradingScheme
@@ -112,20 +120,21 @@ since it is silently unused there.
 
 Configurable for higher levels (e.g. 0.5 means "at least half the points").
 
-### effectiveMax
+### No per-student maximum (`effectiveMax` dropped)
 
-```
-effectiveMax(node) = node.points x (sum of points of non-excluded children / sum of points of all children)
-```
+A node's only maximum is its static `points`. An earlier version also stored a per-student `effectiveMax` in
+`NodeResult` - `node.points` scaled down by the share of children that were excluded - as audit data meant to answer
+"how much of this node was actually assessable for this student?". It was removed (2026-10-01):
 
-`effectiveMax` is **audit data only**. It drives nothing - not the score, not `validated` - and exists to answer a
-single question: "how much of this node was actually assessable for this student?" A student who sees a score out of
-ten with four of the ten test cases ignored needs that recorded somewhere, or the grade cannot be justified.
-
-It is deliberately kept out of score computation because it is **dynamic**: it shrinks per student as things are
-ignored or absent. Letting it into the score would break the static-maximum rule above.
-
-At a leaf it is `points`, or `0` when the leaf is excluded.
+- **It was redundant.** Every excluded child already records its own `NodeResult` with an `absenceStatus` saying why
+  it dropped out. Justifying a grade means pointing at those children ("these four test cases were ignored"), not at
+  a derived number. Any coverage figure the frontend wants can be computed from them when the report is read.
+- **It was misleading.** Since scores are rescaled at every node so an excluded child never penalises the student,
+  a node's score could exceed its `effectiveMax` - a "max" that is not an upper bound, contradicting the
+  static-maximum rule above.
+- **It had no single meaning.** Under `SUM` children are parts of the node, so the excluded share is points-based;
+  under `AVERAGE` it is count-based; under `MIN_CHILD`/`MAX_CHILD` children are alternatives and nothing is lost as
+  long as one survives. A field that needs a different formula per rule and drives nothing was not worth keeping.
 
 Note that `score` and `validated` are separate things - a node can score non-zero but not be validated (below threshold), or score zero but be validated (absent + `PASS`). This is why `validated` is stored explicitly in `NodeResult` rather than derived from score alone.
 
@@ -269,14 +278,16 @@ Storing all results at ingestion time (rather than re-parsing traces on every gr
 
 ### GradeReport
 
-Computed grade for one student on one activity. A new report is created on each recomputation rather than overwriting the previous one.
+Computed grade for one student on one scheme. There is a single report per `(scheme, studentLogin)` (unique index),
+overwritten on recomputation - keeping a report history would make little sense when the scheme itself keeps none.
+`activityUri` is a copy of the scheme's, kept so reports can be fetched by activity without loading the scheme.
 
 ```
 GradeReport
   id:            UUID
   schemeId:      UUID
   schemeVersion: int
-  studentId:     String
+  studentLogin:  String
   activityUri:   String
   computedAt:    Instant
   finalGrade:    double     // pure tree computation, adjustments NOT included
@@ -293,7 +304,7 @@ combined only when the report is written out for teachers:
 exportedGrade = clamp(finalGrade + adjustmentTotal, 0, finalMax)
 ```
 
-Keeping them apart is the same transparency argument as `effectiveMax`: a student looking at 17/20 has to be able to
+Keeping them apart is a transparency argument: a student looking at 17/20 has to be able to
 see that it was 19 minus 2 for trash files. Note the clamp is applied at export only, so a report can legitimately
 record a `finalGrade + adjustmentTotal` above `finalMax` or below zero.
 
@@ -301,7 +312,13 @@ record a `finalGrade + adjustmentTotal` above `finalMax` or below zero.
 enum ReportStatus { FRESH | STALE | COMPUTING | FAILED }
 ```
 
-Recomputation is asynchronous and frontend-triggered. When a scheme is modified, associated reports move to `STALE` - the last known grade stays visible but flagged as outdated until the frontend requests a recomputation.
+Recomputation is asynchronous and frontend-triggered. A report is outdated in two distinct cases, and the last known
+grade stays visible but flagged until the frontend requests a recomputation:
+
+- **The scheme changed**: `report.schemeVersion != scheme.version`. Derived, so nothing is written when a scheme is
+  edited and it cannot drift.
+- **The student's data changed**: a new submission or job arrived after the computation. Ingestion sets
+  `status = STALE` on the affected students' reports.
 
 A student may have multiple submissions for the same assignment. The grading service always picks the canonical one using the activity's existing `pickStrategy`.
 
@@ -311,12 +328,11 @@ A student may have multiple submissions for the same assignment. The grading ser
 NodeResult
   nodeId:        UUID
   score:         double
-  effectiveMax:  double
   validated:     boolean
   absenceStatus: AbsenceStatus
   override:      GradeOverride?
 
-enum AbsenceStatus { PRESENT | ABSENT_PASS | ABSENT_FAIL | ABSENT_IGNORE | IGNORED }
+enum AbsenceStatus { PRESENT | ABSENT_PASS | ABSENT_FAIL | ABSENT_IGNORE | IGNORED | NO_ASSESSABLE_CHILD }
 
 GradeOverride
   score:    double
@@ -325,8 +341,11 @@ GradeOverride
   at:       Instant
 ```
 
-For an adjustment node, `score` records the signed amount that fired (negative for a malus, zero if it did not fire)
-and `effectiveMax` is `0`, since the node takes no part in its parent's ratio.
+For an adjustment node, `score` records the signed amount that fired (negative for a malus, zero if it did not fire).
+It takes no part in its parent's ratio.
+
+`NO_ASSESSABLE_CHILD` marks an aggregating node excluded because none of its children was left to score (all
+ignored, absent-ignored or adjustments).
 
 ## Grade Computation Algorithm
 
@@ -341,7 +360,6 @@ Bottom-up (leaves first). Every node produces a ratio, and `score = node.points 
    with no non-excluded child is itself excluded.
 6. `score = node.points x ratio`.
 7. `validated = ratio >= validationThreshold` for aggregating nodes, the test outcome itself for test cases.
-8. Record `effectiveMax` for audit.
 
 Then, once the whole tree is scored:
 
