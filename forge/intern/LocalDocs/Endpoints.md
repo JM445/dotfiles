@@ -15,27 +15,17 @@ This includes:
   - Listing schemes
   - Getting a scheme
   - Delete a scheme and all its reports & associated nodes
-
-- Grading Nodes
-  - Create a grading node ? This might not be a good idea as the grading node tree is independent from teacher's will
-  - Update a grading node
-  - Get a grading node
-  - Generate the GradingNode tree (but how ? by building it from assignments data, test results and default values ? manually created by teachers ?)
-
-- Discovered Tests
-  - List discovered tests for a ? submissionDef ? activity ? student ? grading node ?
-  - Get a discovered test
-
-- Students
+  - Getting all grading nodes associated to a scheme
+  - Sync the associated grading_node tree to the scheme (add-only)
   - Get student list for a scheme
 
-- Assignments
-  - List assignments
-  - Get assignment
+- Grading Nodes
+  - Update a grading node
+  - Get a grading node
 
-- Submission Definition
-  - List
-  - Get
+- Discovered Tests
+  - List discovered tests for an activity, an assignment or a classname
+  - Get a discovered test
 
 - GradeReports
   - Start grading computation for one student and a specific grading scheme
@@ -52,9 +42,53 @@ This includes:
 
 ## Frontend - Endpoints list
 
-- Scheme
-  - GET /
+### Scheme
 
+#### Scheme management
 
+| REST TYPE | PATH | DESCRIPTION                             |
+|-----------|------|-----------------------------------------|
+| GET    | `/scheme/`             | Get a list of user accessible schemes   |
+| GET    | `/scheme/{scheme_id}`  | Get a specific scheme                   |
+| POST   | `/scheme/`             | Create a scheme                         |
+| PUT    | `/scheme/{scheme_id}`  | Update a scheme                         |
+| DELETE | `/scheme/{scheme_id}`  | Delete a scheme and ALL ASSOCIATED DATA |
+
+#### Grading tree
+
+| REST TYPE | PATH | DESCRIPTION                                                   |
+|-----------|------|---------------------------------------------------------------|
+| GET    | `/scheme/{scheme_id}/grading_node/` | Get the grading node tree of a scheme                         |
+| POST   | `/scheme/{scheme_id}/tree/sync`     | Update the grading tree of a scheme with new discovered tests |
+
+#### Students
+
+| REST TYPE | PATH | DESCRIPTION                             |
+|-----------|------|-----------------------------------------|
+| GET    | `/scheme/{scheme_id}/logins/` | Get all logins associated with a scheme |
+| GET    | `/scheme/{scheme_id}/groups/` | Get all groups associated with a scheme |
+
+#### Grade reports
+
+| REST TYPE | PATH                                                                               | DESCRIPTION                                                      |
+|-----------|------------------------------------------------------------------------------------|------------------------------------------------------------------|
+| GET    | `/scheme/{scheme_id}/grade_report?state=...&login=...&group=...`                   | Get a list of grade reports for a scheme, with filter options    |
+| GET    | `/scheme/{scheme_id}/grade_report/{login}`                                         | Get a specific student's grade report                            |
+| POST   | `/scheme/{scheme_id}/grade_report/{login}/compute`                                 | Update or create a grade report for a student                    |
+| GET    | `/scheme/{scheme_id}/grade_report/export?format=csv\|xlsx&ignoreStale=true\|false` | Export a sheet with a syntesis of all grade reports for a scheme |
+
+### Grading Nodes
+
+| REST TYPE | PATH | DESCRIPTION                                                                                                    |
+|-----------|------|----------------------------------------------------------------------------------------------------------------|
+| GET    | `/grading_node/{node_id}` | Get info of a grading node                                                                                     |
+| PUT    | `/grading_node/{node_id}` | Update info of a grading node (put refused if modifiing permanent fields: id, scheme_id, parent_id, reference) |
+
+### Discovered Tests
+
+| REST TYPE | PATH | DESCRIPTION                            |
+|-----------|------|----------------------------------------|
+| GET    | `/discovered_test/{test_id}`                                       | Get info on a specific discovered test |
+| GET    | `/discovered_test?activityUri=...&assignmentUri=...&classname=...` | Might not be needed, keep for later    |
 
 ## TMP Notes

@@ -1,6 +1,6 @@
 - [Staging DB access](staging_db_access.md) — kube-switcher `switch` for context + `-n <namespace>` needed for kubectl port-forward
 - [Confirm before editing](feedback_confirm_edits.md) — ask before any file edits in this repo, even in auto-mode
-- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: grading logic, staleness & error handling done; next = REST endpoints (user writes first ones, see LocalDocs/Endpoints.md); read the LocalDocs design docs first
+- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: grading logic done; endpoint list finalised 2026-10-05 in LocalDocs/Endpoints.md, next = implement them (user writes first ones); read the LocalDocs design docs first
 - [framework-trace / S3 trace fetch](reference_framework_trace.md) — Xml.deserialize(_, Trace.class); job.traceUrl is a raw S3 key, use as-is
 - [Intranet URI/slug convention](reference_intranet_uri_convention.md) — URIs globally unique, built from parent URI + slug; don't double-key on both
 - [Testcontainers Docker API fix](project_testcontainers_docker_api_version.md) — JDK_JAVA_OPTIONS="-Dapi.version=1.41" needed for @QuarkusTest devservices on this machine
@@ -10,3 +10,4 @@
 - [Stale target/classes resources](project_stale_target_resources.md) — deleting a source file leaves a stale compiled copy until `mvnw clean`; different fix than the build-cache gotcha
 - [LocalDocs symlink gotcha](reference_localdocs_symlink.md) — LocalDocs/ is a symlink; find/grep -r silently skip its contents without -L
 - [Design discussion style](feedback_design_discussion_style.md) — during open design exploration, ask in prose, not AskUserQuestion — user may have context that doesn't fit fixed options
+- [Intranet permission pattern](reference_intranet_permission_pattern.md) — auth lib = global roles only; per-activity access is hand-rolled per service (see operator AccessService)

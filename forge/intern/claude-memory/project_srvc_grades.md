@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 10b2b0f7-23c6-4096-b45e-6a024b8057ae
-  modified: 2026-09-11T15:07:04.701Z
+  modified: 2026-10-05T15:11:39.581Z
 ---
 
 New Quarkus app `srvc-grades` (apps/srvc-grades) was scaffolded in commit 6681e4374 (2026-07-02): a JPA data model (GradeReport, GradingNode, GradingScheme, GroupMember, Job, SubmissionDefinition, Submission, TestResult, NodeReference), matching repositories, a Flyway init migration, and a subscriber (SubmissionSubscriber) that ingests `ActivityAggregate`/`SubmissionAggregate` payloads via DataIngestionService into the DB.
@@ -114,6 +114,18 @@ It collapses the model to one formula: **every node derives a ratio in [0,1] fro
 - Decisions: deleting a scheme deletes its nodes and reports. **Tree editing is per-node** (not whole-tree PUT) so teachers' work saves incrementally — so every node write must bump `scheme.version` itself. **Overrides postponed** to a future update (note: `computeAndPersist` resets `nodeResults`, so overrides would be lost on recompute anyway). **Permissions postponed** until endpoints are done (user will study the permission system; open: student self-access/publication, per-activity teacher scoping via activity `managers`).
 - **Scheme validator postponed** past first release; computation failure (FAILED + 422) is the safety net. Assistant's caveats: a few invalid states compute *silently* instead of failing, so put cheap checks in the node write endpoints: (1) **parent cycles** — per-node editing makes them possible and the recursion throws `StackOverflowError`, an `Error` that `computeGradeReport`'s `catch (RuntimeException)` does NOT catch (no FAILED mark); also check parent is in the same scheme; (2) **TestCaseRef pairing** — `discoveredTest.assignmentUri` must equal the submission definition's `assignmentUri`, otherwise the lookup silently finds nothing and the leaf is graded absent (wrong grade, no error). Other invalid states are harmless (validationThreshold ignored on TEST_CASE, mandatory+ignored) or fail loudly / show visibly (no root -> NPE -> FAILED; all children excluded -> 0).
 - Frontend -> srvc-grades routing is unknown (not in this repo, `port-frontend` does not proxy to services) — user should ask a Forge member; affects CORS/auth.
+
+**2026-10-05 session — endpoint list FINALISED in `LocalDocs/Endpoints.md` (tables with user-written descriptions; that file is the source of truth for paths, don't duplicate here).** No code written yet. Decisions behind it (all the user's):
+- **No node creation/deletion endpoints.** The tree strictly follows the activity structure; only `GET /grading_node/{id}` + `PUT /grading_node/{id}` (PUT refuses changes to server-owned fields: id, scheme, parent, reference). Unwanted nodes get `ignored`, never deleted. Teacher-driven re-organisation possible later, not now.
+- **Tree growth via `POST /scheme/{id}/tree/sync`**: add-only, idempotent merge for newly discovered tests; must never overwrite teacher-edited fields. Tree generation at scheme creation should reuse the same logic. Open: whether sync should mark reports stale.
+- **Bonus/malus is a flag on existing nodes**, not separate nodes; there is NO "Penalties" holder node decision (the design doc only mentions it as an illustration). Don't bring it back as a requirement.
+- **No activity/assignment/submissionDef endpoints** — the frontend gets those from other services.
+- Students: `/scheme/{id}/logins/` and `/groups/` (derived from `GroupMemberModel` of the activity's submission defs). Assistant suggested enriching entries with a report summary since reports only exist once computed — not confirmed by user.
+- Grade reports are addressed by **login**, not report id. List filter `?state=` takes enum-like values (assistant suggested parsing straight into `ReportStatus`, case-insensitive, `all` = param absent).
+- Compute = **POST** `/scheme/{id}/grade_report/{login}/compute`, returns 200 + report. "Compute all" is a **frontend loop**, no batch endpoint.
+- **Export is a synchronous GET** (`.../grade_report/export?format=csv|xlsx&ignoreStale=...`) — reports are pre-computed so no async job/status machinery; async export rejected unless it proves slow.
+- **Scheme validation runs at computation start** (drafts can be saved invalid); no validation endpoint for now, maybe later for UI display. Assistant's recommendation: on an invalid scheme, reject with 409/422 + violations list BEFORE touching any report, not mark every student FAILED.
+- **Permissions deferred** — user will dig into it after endpoints. See [[reference_intranet_permission_pattern]].
 
 **Still not done / deliberately left:** the scheme validator itself, and the export step that combines `finalGrade + adjustmentTotal` with the clamp.
 
