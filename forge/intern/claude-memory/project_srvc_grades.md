@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 10b2b0f7-23c6-4096-b45e-6a024b8057ae
-  modified: 2026-10-05T15:11:39.581Z
+  modified: 2026-10-08T14:07:26.482Z
 ---
 
 New Quarkus app `srvc-grades` (apps/srvc-grades) was scaffolded in commit 6681e4374 (2026-07-02): a JPA data model (GradeReport, GradingNode, GradingScheme, GroupMember, Job, SubmissionDefinition, Submission, TestResult, NodeReference), matching repositories, a Flyway init migration, and a subscriber (SubmissionSubscriber) that ingests `ActivityAggregate`/`SubmissionAggregate` payloads via DataIngestionService into the DB.
@@ -126,6 +126,10 @@ It collapses the model to one formula: **every node derives a ratio in [0,1] fro
 - **Export is a synchronous GET** (`.../grade_report/export?format=csv|xlsx&ignoreStale=...`) — reports are pre-computed so no async job/status machinery; async export rejected unless it proves slow.
 - **Scheme validation runs at computation start** (drafts can be saved invalid); no validation endpoint for now, maybe later for UI display. Assistant's recommendation: on an invalid scheme, reject with 409/422 + violations list BEFORE touching any report, not mark every student FAILED.
 - **Permissions deferred** — user will dig into it after endpoints. See [[reference_intranet_permission_pattern]].
+
+**2026-10-08 review of Endpoints.md vs code (flagged to user, not yet decided):** tree creation/sync needs the activity structure (assignment-group hierarchy, assignment labels) but ingestion only stores `SubmissionDefinitionModel` (uri, activityUri, assignmentUri, pick), so nothing can build ASSIGNMENT_GROUP/ASSIGNMENT nodes yet: persist it at ingestion or fetch from repo-activity. Also: `?state=stale` must include derived staleness (`schemeVersion != scheme.version`). Immutable node parent/reference removes the earlier cycle/TestCaseRef-pairing worries from PUT; they move into sync.
+
+**2026-10-08 — structure copy + re-key drafted (uncommitted, awaiting user review, 46/46 green):** new `activity`/`assignment_group`/`assignment` tables (plain URI columns, no FKs, like the existing mirror tables; `position` = order among siblings), `submission_definitions.slug`/`position`. repo-activity always wraps flat activities in a synthetic `<activityUri>/root` group, and rejects groups with both assignments and subgroups. Tree gets a `SUBMISSION_DEF` level (user: practice vs final defs can run same-named tests with different values); `TestCategoryRef` is now `(submissionDefUri, classname)`. `DiscoveredTest` re-keyed on `(submission_def_uri, classname, test_key)` (option (a)); `assignmentUri` kept as plain column; `TestCaseRef` still carries `submissionDefUri`. Design doc + validator doc updated the same day (new `### Activity structure (local copy)` section, SUBMISSION_DEF level with the practice/final rationale, DiscoveredTest key history).
 
 **Still not done / deliberately left:** the scheme validator itself, and the export step that combines `finalGrade + adjustmentTotal` with the clamp.
 

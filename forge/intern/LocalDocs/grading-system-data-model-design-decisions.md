@@ -10,12 +10,12 @@ Exams and Projects only for now. Workshop grading is out of scope for the initia
 
 * Multiple independent assignments or assignment groups
 * Tree structure with aggregation rules applied recursively
-* Granularity: AssignmentGroup → Assignment → TestCategory → TestCase
+* Granularity: AssignmentGroup → Assignment → SubmissionDefinition → TestCategory → TestCase
 
 ### Project
 
 * Single assignment defines the final grade
-* Granularity: Assignment → TestCategory → TestCase
+* Granularity: Assignment → SubmissionDefinition → TestCategory → TestCase
 
 ## Core Entities
 
@@ -56,9 +56,20 @@ A node in the grading tree. The tree always follows this hierarchy:
 Activity root
   L---- AssignmentGroup   (optional)
         L---- Assignment
-              L---- TestCategory
-                    L---- TestCase
+              L---- SubmissionDefinition
+                    L---- TestCategory
+                          L---- TestCase
 ```
+
+The `SubmissionDefinition` level is needed because an assignment may declare several of them, running tests that share
+names but not meaning. A typical case: a "practice" definition that lets students run the test suite during the
+project, and a "final" one with similar tests using different values. Each needs its own subtree so the two can be
+weighted, ignored or flagged independently.
+
+The tree is **not** built at ingestion. Ingestion only keeps a local copy of the activity structure (see
+`Activity structure` below); the grading tree is teacher-owned and grows only through an explicit, add-only sync from
+that copy. Writing grading nodes at ingestion would either overwrite a tree the teacher has edited, or leave it
+incomplete, and would close the door to letting teachers reorganise the tree later.
 
 ```
 GradingNode
@@ -224,17 +235,46 @@ Typed discriminant linking a node to its intranet entity:
 NodeReference (sealed)
   AssignmentGroupRef  { assignmentGroupUri: String }
   AssignmentRef       { assignmentUri: String }
-  TestCategoryRef     { assignmentUri: String, classname: String }
+  SubmissionDefRef    { submissionDefUri: String }
+  TestCategoryRef     { submissionDefUri: String, classname: String }
   TestCaseRef         { submissionDefUri: String, discoveredTestId: UUID }
 ```
 
 All levels reference their intranet entity by URI, never by slug - URIs are the globally unique identifier here (see
 the `DiscoveredTest` key discussion below).
 
-`TestCaseRef` references a `DiscoveredTest` by UUID to avoid dealing with the full composite key everywhere. It still
-needs `submissionDefUri` alongside it: a `DiscoveredTest` is keyed on the *assignment*, and an assignment may declare
-several submission definitions, so the test identity alone does not say which submission definition a student is
-graded against - and resolving a student to a group, then to a picked submission, requires exactly that.
+`TestCategoryRef` carries the submission definition rather than the assignment: the same classname shows up under every
+submission definition running it, and each of those is a distinct category node.
+
+`TestCaseRef` references a `DiscoveredTest` by UUID to avoid dealing with the full composite key everywhere. Since
+`DiscoveredTest` is keyed on the submission definition, the test already implies it; `submissionDefUri` is kept on the
+reference anyway so computation can go straight from the node to the student's group and picked submission. Node
+references are immutable once created (set by sync), so the two cannot drift apart.
+
+### Activity structure (local copy)
+
+The only source of truth for activities is the Kafka `ActivityAggregate`; like every service, `srvc-grades` keeps a
+local copy of what it needs instead of calling other services. Each aggregate fully rewrites that copy: rows still
+present are upserted, rows gone from the aggregate are pruned.
+
+```
+Activity              { uri, name }
+AssignmentGroup       { uri, activityUri, parentUri?, name, position }   // parentUri null for the root
+Assignment            { uri, activityUri, groupUri, name, position }
+SubmissionDefinition  { uri, activityUri, assignmentUri, slug, position, pick }   // + its GroupMembers
+```
+
+`position` is the index among siblings in the aggregate, so the grading tree can follow the order of the activity.
+These tables use plain URI columns without foreign keys, like the rest of the copy: they mirror an aggregate already
+validated upstream, and foreign keys would only constrain the order of the prune/upsert steps.
+
+Two facts about the aggregate worth knowing, both guaranteed by `repo-activity`:
+
+* There is always a root group. A "flat" activity (a list of assignments, as PaCV2 allows) is wrapped in a synthetic
+  group with URI `<activityUri>/root`, named after the activity.
+* A group has assignments **or** subgroups, never both (rejected at activity creation).
+
+The copy is not used by grade computation, which only reads the scheme's tree; changing it marks no report stale.
 
 ### DiscoveredTest
 
@@ -243,22 +283,33 @@ Tests are not predefined - they are discovered from JUnit XML results produced b
 ```
 DiscoveredTest
   id:              UUID
-  activityUri:     String
-  assignmentUri:   String
-  classname:       String    // <testcase classname="...">
+  activityUri:      String
+  assignmentUri:    String
+  submissionDefUri: String
+  classname:        String    // <testcase classname="...">
   testKey:         String    // <testcase name="...">
   firstSeenAt:     Instant
   lastSeenAt:      Instant
   occurrenceCount: int
 ```
 
-Natural (unique) key: `(assignmentUri, classname, testKey)` — `activityUri` is deliberately excluded from it, since URIs on this intranet are globally unique strings built by concatenating parent URIs (`assignmentUri` already embeds its owning `activityUri`), so including `activityUri` in the key would add no actual uniqueness guarantee. It's kept as a plain, non-key column purely for activity-wide queries (an `Exam` spans multiple assignments under one `activityUri`; without this column, listing every discovered test across the whole exam would require first enumerating all of its assignment URIs). Both URI fields are stored verbatim (no parsing) — they're already available as-is on the loaded `SubmissionDefinitionModel` at ingestion time.
+Natural (unique) key: `(submissionDefUri, classname, testKey)`. It was originally keyed on the assignment, but two
+submission definitions of one assignment may run different tests under the same name (practice vs final, see
+`GradingNode`); an assignment key merged them into one row, so sync could not tell which definition a test belongs to
+and `occurrenceCount`/`firstSeenAt`/`lastSeenAt` mixed both. This matches the test-name uniqueness assumption, which is
+already per submission definition. The cost is that a test shared by two definitions is two rows - which is the point.
+
+`activityUri` and `assignmentUri` are excluded from the key, since URIs on this intranet are globally unique strings
+built by concatenating parent URIs (`submissionDefUri` already embeds both), so they would add no uniqueness. They are
+kept as plain, non-key columns for activity- and assignment-wide queries (an `Exam` spans multiple assignments under one
+`activityUri`). All URI fields are stored verbatim (no parsing) — they're already available as-is on the loaded
+`SubmissionDefinitionModel` at ingestion time.
 
 A teacher can only reference a test in a scheme after at least one submission has produced it. The scheme validator rejects `TestCaseRef` pointing to an unknown `discoveredTestId`.
 
 Many tests only appear in some submissions (cheat detection, compilation errors/warnings, etc.) - this is expected. The `absenceBehavior` on the node handles the semantic for each case.
 
-`DiscoveredTest` is a dimension/catalog table, not a duplicate of `TestResult` below: it answers "does this test conceptually exist for this activity", independent of any one submission's outcome, and it is what `GradingNode.reference` (`TestCaseRef`) points to. Keeping it separate (rather than deriving the set of known tests live from `TestResult`) matters for two reasons: it stays resolvable even if older `TestResult` rows are later archived/pruned for space, and `firstSeenAt`/`lastSeenAt`/`occurrenceCount` are cheap reads for the scheme-authoring UI instead of a live aggregate over a potentially huge result table.
+`DiscoveredTest` is a dimension/catalog table, not a duplicate of `TestResult` below: it answers "does this test conceptually exist for this submission definition", independent of any one submission's outcome, and it is what `GradingNode.reference` (`TestCaseRef`) points to. Keeping it separate (rather than deriving the set of known tests live from `TestResult`) matters for two reasons: it stays resolvable even if older `TestResult` rows are later archived/pruned for space, and `firstSeenAt`/`lastSeenAt`/`occurrenceCount` are cheap reads for the scheme-authoring UI instead of a live aggregate over a potentially huge result table.
 
 ### TestResult
 

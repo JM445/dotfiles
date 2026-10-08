@@ -32,7 +32,7 @@ blocked from computing. Not decided.
 | A node's parent belongs to the same scheme as the node | Nothing in the schema ties `child.scheme_id` to `parent.scheme_id` |
 | No cycles: a node is never its own ancestor | `parent_id` is a self-FK with nothing preventing a loop; the recursive walk would not terminate |
 | The root has at least one non-excluded child | A scheme whose only child is, say, a "Penalties" grouping node has every child excluded, so the root is excluded too and no grade can be produced |
-| Node reference types follow the hierarchy: `ASSIGNMENT_GROUP` > `ASSIGNMENT` > `TEST_CATEGORY` > `TEST_CASE` | The model assumes this ordering; a `TEST_CASE` with children, or an `ASSIGNMENT` under a `TEST_CASE`, is meaningless |
+| Node reference types follow the hierarchy: `ASSIGNMENT_GROUP` > `ASSIGNMENT` > `SUBMISSION_DEF` > `TEST_CATEGORY` > `TEST_CASE` | The model assumes this ordering; a `TEST_CASE` with children, or an `ASSIGNMENT` under a `TEST_CASE`, is meaningless |
 
 ### References
 
@@ -41,7 +41,8 @@ blocked from computing. Not decided.
 | A `TEST_CASE` node has a non-null `ref_discovered_test_id` | The column is nullable because the whole `NodeReference` is a flattened embeddable, so the DB cannot require it per ref type. A null reaches `findByIdOptional(null)` at compute time |
 | `discoveredTestId` points at an existing `DiscoveredTest` | Already enforced by the FK. Kept here because the validator should give a readable error rather than surfacing a constraint violation |
 | A `TEST_CASE` node's `submissionDefUri` refers to an existing submission definition | Resolved at compute time, where a miss currently throws |
-| The referenced `DiscoveredTest` belongs to the assignment of the referenced submission definition | Nothing structurally prevents pairing a test from one assignment with a submission definition from another; the resulting grade would be silently wrong rather than failing |
+| The referenced `DiscoveredTest`'s `submissionDefUri` equals the node's `submissionDefUri` | The test implies its definition, but the reference stores both. A mismatch would read the student's submission for one definition and look for a test of another: no result is found and the leaf is silently graded absent |
+| A node's `submissionDefUri` matches the one of its `SUBMISSION_DEF` ancestor | Sync builds them consistently and references are immutable, so this only guards against a sync bug |
 
 ### Flags and fields
 
@@ -103,7 +104,7 @@ as a direction rather than a plan.
 * Every test the scheme references via a `TestCaseRef` appears in the trace. If it does not, every student silently
   falls through to `absenceBehavior`, which is exactly the kind of failure that looks like a grading bug rather than
   a data problem.
-* Tests present in the catalog for this assignment but absent from this student's trace, and the reverse. This is
+* Tests present in the catalog for this submission definition but absent from this student's trace, and the reverse. This is
   **not** an error - cheat-detection and compilation tests legitimately appear only sometimes - but it is a useful
   signal: "this trace is missing the 30 tests every other student produced" is almost always a compilation failure
   worth surfacing to a teacher rather than silently grading as a pile of absences.
