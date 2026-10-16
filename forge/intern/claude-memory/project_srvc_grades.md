@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 10b2b0f7-23c6-4096-b45e-6a024b8057ae
-  modified: 2026-10-08T14:07:26.482Z
+  modified: 2026-10-13T16:44:52.577Z
 ---
 
 New Quarkus app `srvc-grades` (apps/srvc-grades) was scaffolded in commit 6681e4374 (2026-07-02): a JPA data model (GradeReport, GradingNode, GradingScheme, GroupMember, Job, SubmissionDefinition, Submission, TestResult, NodeReference), matching repositories, a Flyway init migration, and a subscriber (SubmissionSubscriber) that ingests `ActivityAggregate`/`SubmissionAggregate` payloads via DataIngestionService into the DB.
@@ -130,6 +130,29 @@ It collapses the model to one formula: **every node derives a ratio in [0,1] fro
 **2026-10-08 review of Endpoints.md vs code (flagged to user, not yet decided):** tree creation/sync needs the activity structure (assignment-group hierarchy, assignment labels) but ingestion only stores `SubmissionDefinitionModel` (uri, activityUri, assignmentUri, pick), so nothing can build ASSIGNMENT_GROUP/ASSIGNMENT nodes yet: persist it at ingestion or fetch from repo-activity. Also: `?state=stale` must include derived staleness (`schemeVersion != scheme.version`). Immutable node parent/reference removes the earlier cycle/TestCaseRef-pairing worries from PUT; they move into sync.
 
 **2026-10-08 — structure copy + re-key drafted (uncommitted, awaiting user review, 46/46 green):** new `activity`/`assignment_group`/`assignment` tables (plain URI columns, no FKs, like the existing mirror tables; `position` = order among siblings), `submission_definitions.slug`/`position`. repo-activity always wraps flat activities in a synthetic `<activityUri>/root` group, and rejects groups with both assignments and subgroups. Tree gets a `SUBMISSION_DEF` level (user: practice vs final defs can run same-named tests with different values); `TestCategoryRef` is now `(submissionDefUri, classname)`. `DiscoveredTest` re-keyed on `(submission_def_uri, classname, test_key)` (option (a)); `assignmentUri` kept as plain column; `TestCaseRef` still carries `submissionDefUri`. Design doc + validator doc updated the same day (new `### Activity structure (local copy)` section, SUBMISSION_DEF level with the practice/final rationale, DiscoveredTest key history).
+
+**2026-10-13 — ARCHITECTURE PIVOT pending a team call (no code changed). Endpoint work is ON HOLD until then.** A teammate replied that endpoints must NOT live in srvc-grades. Their reasons:
+- They belong in srvc-activity-operator, which is the operator SPA's only backend. Long term, all endpoints are to be centralised in a future `port-intranet`.
+- Commands may only target a **repo** (source of truth). A service must not publish aggregates.
+- srvc-grades stores real, non-derivable data (scheme config, future manual overrides), so it should become **repo-grades**. It would receive commands from the operator and publish grade aggregates back.
+
+This is the repo-achievement pattern on origin/main. repo-achievement has no REST, only command and aggregate subscribers plus `publishAggregate`, with the messages in `exchange/.../achievements/{command,aggregate}`. On the operator side, `AchievementService` sends the commands and `OperatorSubscriber` consumes `achievement-aggregate`. See [[reference_frontend_backend_comm]].
+
+Expected impact:
+- Domain logic, models and ingestion stay as they are.
+- `SchemeResource`, `Permissions`, the DTOs and `AccessService` move to the operator, which already has its own per-activity AccessService.
+- `Endpoints.md` becomes the operator endpoint spec, plus a list of commands and aggregates.
+- The module gets renamed.
+- The frontend reads activity structure from the operator's existing `/api/activities`.
+
+Open questions raised for the call:
+- aggregate granularity
+- whole-tree vs fine-grained commands (this conflicts with the per-node editing decision of 2026-10-05)
+- command validation and error feedback, since Kafka gives no response
+- UI handling of async staleness
+- isolating the grade endpoints in the operator so they're easy to move to port-intranet
+
+The branch was 213 commits behind origin/main and should be updated. The assistant offered to draft a commands/aggregates sketch from Endpoints.md, and the user deferred until after the call.
 
 **Still not done / deliberately left:** the scheme validator itself, and the export step that combines `finalGrade + adjustmentTotal` with the clamp.
 

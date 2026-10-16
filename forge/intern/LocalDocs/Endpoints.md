@@ -4,7 +4,7 @@
 
 This document is a working document and is subject to evolution. It helps me organizing my mind and should not be taken as a source of absolute truth.
 
-## Frontend - What should it be able to do (brainstorm)
+## What will frontend need (brainstorm)
 
 Frontend features will be designed to let teachers build their own grading schemes and configure anything needed to compute grades.
 This includes:
@@ -40,7 +40,7 @@ This includes:
   - Get report exportation status ?
   - Get report exportation result
 
-## Frontend - Endpoints list
+## Endpoints list
 
 ### Scheme
 
@@ -90,5 +90,3 @@ This includes:
 |-----------|------|----------------------------------------|
 | GET    | `/discovered_test/{test_id}`                                       | Get info on a specific discovered test |
 | GET    | `/discovered_test?activityUri=...&assignmentUri=...&classname=...` | Might not be needed, keep for later    |
-
-## TMP Notes
