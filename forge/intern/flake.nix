@@ -55,6 +55,10 @@
               # Set JAVA_HOME for tools that need it
               export JAVA_HOME="${pkgs.jdk21}"
 
+              # Stable JDK path for IntelliJ (SDK "21" -> <repo>/.jdk), so the IDE
+              # never references a /nix/store hash that may not exist on this host
+              ln -sfn "${pkgs.jdk21.home}" "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.jdk"
+
               # Force Docker api version (must reach the Surefire-forked JVM too,
               # so this needs JDK_JAVA_OPTIONS rather than MAVEN_OPTS)
               export JDK_JAVA_OPTIONS="-Dapi.version=1.41"

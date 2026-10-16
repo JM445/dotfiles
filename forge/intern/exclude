@@ -5,3 +5,4 @@ flake.lock
 **/application-dev.properties
 .claude
 LocalDocs
+.jdk

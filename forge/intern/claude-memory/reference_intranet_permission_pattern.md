@@ -1,21 +1,19 @@
 ---
 name: reference_intranet_permission_pattern
-description: How per-activity authorization is done in this monorepo (srvc-activity-operator AccessService) — the auth lib only gives global roles
+description: How per-tenant/per-activity authorization works in this monorepo — framework-auth already carries tenant permissions; only activity managers are hand-rolled
 metadata:
   node_type: memory
   type: reference
-  originSessionId: e9e2a0d3-30ec-4520-9182-8c9617a26824
-  modified: 2026-10-05T15:11:46.024Z
+  originSessionId: 0fd7d4dc-d060-489d-b154-803293eea21b
+  modified: 2026-10-09T12:32:52.445Z
 ---
 
-Two layers, found 2026-10-05 while scoping `GET /scheme/` filtering for srvc-grades:
+Corrected 2026-10-09 from the team's Outline doc "Auth: workflow et mécanismes" (user had a copy in /tmp). Earlier version of this memory said services ingest TenantAggregate themselves — **wrong as a general rule**.
 
-1. **Global roles** from the `epita.auth` lib, configured as `epita.auth.permissions."/admin/grades".users=...` in `application.properties`, checked with `@RolesAllowed(...)` / `securityIdentity.hasRole(...)`. All-or-nothing, not per resource.
-2. **Per-resource access is computed by each service from aggregates it stores itself.** Reference implementation: `apps/srvc-activity-operator/.../domain/service/AccessService.java`:
-   - `TenantMemberModel(login, tenantSlug, permission)` rebuilt from `TenantAggregate.permissions` (enum `TenantPermission` in `exchange/.../aggregate/tenant/v001/`: INTRA_TRACE_READ/RETRY/PUBLISH, INTRA_NODE_READ, ...).
-   - `ManagerModel(login, resourceUri, scope)` from the `managers` lists on `ActivityAggregate` (activity, assignment group, assignment, submission levels). `ActivityAggregate.tenantSlug` gives the owning tenant.
-   - Rule: full-scope role OR tenant permission OR manager of the resource; otherwise throw a *not found* error (not 403).
+1. **Global permissions**: `@RolesAllowed(Permissions.X)` / `securityIdentity.hasRole(...)`. Source: srvc-auth DB, broadcast as `PermissionAggregate` on Kafka, cached in memory by every service embedding `framework-auth` (its own `AuthSubscriber`, nothing to write).
+2. **Tenant permissions** (`TenantPermission` enum in exchange `TenantAggregate`): repo-tenant -> TenantAggregate -> srvc-auth translates to `/tenant/<slug>/<perm lowercased, _ -> />` -> PermissionAggregate -> framework-auth cache. Check programmatically: `@Authenticated` on the endpoint + `AuthService.currentUserHasTenantPermission(slug, perm)` (framework-auth, since 2023; used by port-frontend `PermissionService`/`ContextService`). Child tenants inherit parents' permissions (done in repo-tenant).
+3. **Activity managers** (`ActivityAggregate.managers`, + `tenantSlug`) are NOT in the permission system: still stored and checked by each service. `srvc-activity-operator`'s `AccessService` also keeps its own tenant-member table — an outlier, not the pattern to copy.
 
-For srvc-grades this would mean storing activity `tenantSlug` + managers, subscribing to `tenant-aggregate`, and filtering schemes in the query. Open: no tenant permission fits "can grade" (adding one changes the shared `exchange` enum), and whether assignment-level managers count. Assistant did not read the `epita.auth` lib internals — a per-resource helper there is unlikely but not ruled out.
+Gaps: framework-auth only answers yes/no per tenant slug, no "list tenants where I have X" — for list endpoints, loop over the (few) known tenant slugs. `currentUserHasPermission` doesn't consult `epita.auth.enable=false` bypass, so with auth disabled tenant checks likely return false (not verified at runtime).
 
 Related: [[project_srvc_grades]]
