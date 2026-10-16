@@ -1,7 +1,6 @@
 - [Staging DB access](staging_db_access.md) — kube-switcher `switch` for context + `-n <namespace>` needed for kubectl port-forward
 - [Confirm before editing](feedback_confirm_edits.md) — ask before any file edits in this repo, even in auto-mode
-- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: grading logic done; 2026-10-13 pivot pending team call (srvc-grades → repo-grades, endpoints move to srvc-activity-operator, Kafka commands/aggregates); read the LocalDocs design docs first
-- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: GET /scheme endpoints + access control done 2026-10-09 (uncommitted, 67/67); read "STATE FOR NEXT SESSION" + LocalDocs design docs first
+- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: grading logic done; 2026-10-16 team meeting DECIDED repo-grades rework (Kafka-only, no traces/DiscoveredTest, text test refs, REST in operator); read the LocalDocs design docs first
 - [framework-trace / S3 trace fetch](reference_framework_trace.md) — Xml.deserialize(_, Trace.class); job.traceUrl is a raw S3 key, use as-is
 - [Intranet URI/slug convention](reference_intranet_uri_convention.md) — URIs globally unique, built from parent URI + slug; don't double-key on both
 - [Testcontainers Docker API fix](project_testcontainers_docker_api_version.md) — JDK_JAVA_OPTIONS="-Dapi.version=1.41" needed for @QuarkusTest devservices on this machine
@@ -11,7 +10,6 @@
 - [Stale target/classes resources](project_stale_target_resources.md) — deleting a source file leaves a stale compiled copy until `mvnw clean`; different fix than the build-cache gotcha
 - [LocalDocs symlink gotcha](reference_localdocs_symlink.md) — LocalDocs/ is a symlink; find/grep -r silently skip its contents without -L
 - [Design discussion style](feedback_design_discussion_style.md) — during open design exploration, ask in prose, not AskUserQuestion — user may have context that doesn't fit fixed options
-- [Intranet permission pattern](reference_intranet_permission_pattern.md) — auth lib = global roles only; per-activity access is hand-rolled per service (see operator AccessService)
 - [Frontend↔backend comm](reference_frontend_backend_comm.md) — operator SPA only calls srvc-activity-operator (BFF, Kafka behind it); discord SPA calls services directly
 - [Intranet permission pattern](reference_intranet_permission_pattern.md) — tenant perms come via framework-auth (`AuthService.currentUserHasTenantPermission`); only activity managers are hand-rolled
 - [IDEA SDK /nix/store paths](reference_idea_nix_jdk_paths.md) — IDE red everywhere but mvnw OK → SDK homePath in jdk.table.xml points at a /nix/store path missing on this host
