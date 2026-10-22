@@ -1,5 +1,23 @@
 # Grading System: Data Model & Design Decisions
 
+## Context: the repo-grades rework
+
+Since the 2026-10-16 team meeting, `srvc-grades` is being turned into **`repo-grades`**, the source of truth for grading
+schemes and grade reports. This changes how the app talks to the rest of the system, not how a grade is computed:
+
+* All communication goes through Kafka and is asynchronous. `repo-grades` exposes no REST endpoint: the endpoints live
+  in `srvc-activity-operator`, which sends commands and consumes the aggregates published here (see
+  `Kafka Communication`).
+* `srvc-activity-operator` builds the initial grading tree and owns test discovery. `repo-grades` keeps no catalog of
+  existing tests: a test node references its test by plain text.
+* `repo-grades` ingests `SubmissionAggregate` and keeps, for each job, the S3 address of its trace. Traces are parsed
+  **at computation time and never stored**.
+* No history for now: neither schemes nor reports keep past versions, and consumers keep only the last aggregate they
+  received.
+
+The grading logic itself (ratios, aggregation rules, flags, adjustments, the computation algorithm) is unchanged by
+the rework. Sections that were rewritten for it say so.
+
 ## Scope
 
 Exams and Projects only for now. Workshop grading is out of scope for the initial implementation, but the model should not make it impossible to add later.
@@ -28,6 +46,10 @@ stale by construction - nothing has to be updated on edit. The cost is history: 
 reference nodes that have since changed or been deleted, so its breakdown can no longer be shown against the tree it
 was computed from. Storing a snapshot of the tree in the report at computation time would close that gap; deferred.
 
+*(2026-10-22)* Immutable scheme versions were considered after the team meeting and **dropped for now**: no history
+is kept, either here or in the operator, which keeps only the last `GradingSchemeAggregate` it received. Edits arrive
+as a whole tree (`PutGradingSchemeCommand`), which replaces the stored one.
+
 Several schemes per activity may be allowed later (e.g. a teacher trying alternative schemes). Anything keyed on the
 scheme rather than on the activity will survive that change.
 
@@ -39,14 +61,24 @@ GradingScheme
   finalMax:    double       // total grade scale (e.g. 20.0 for a grade out of 20)
   createdAt:   Instant
   updatedAt:   Instant
-  root:        GradingNode  // synthetic root node at activity level
+  root:        GradingNode  // synthetic root node at activity level, stored as jsonb
 ```
 
-`root` is a stored FK (`grading_scheme.root_node_id`). Nodes keep their own `scheme` reference as well, so that
-scheme-wide flat queries (validation, listing every node of a scheme) don't have to walk the tree. That makes the
-two FKs circular, which is fine as long as `root_node_id` is nullable: Hibernate inserts the scheme, cascades the
-tree, then updates the pointer. A partial unique index on `grading_node (scheme_id) WHERE parent_id IS NULL`
-guarantees a scheme has exactly one parentless node.
+**Storage (rewritten 2026-10-22).** The tree is stored as a single `jsonb` column on the scheme
+(`@Type(JsonType.class) @Column(columnDefinition = "jsonb")`, the mapping `GradeReport.nodeResults` already uses and
+that several apps use for trees, e.g. `repo-submission`'s `Activity.activityGraph`). A whole-tree command makes this the
+natural fit: replacing a tree is one column write, nothing has to be diffed node by node.
+
+It replaces the earlier relational layout (a `grading_node` table, a circular `root_node_id` / `scheme_id` FK pair and
+a partial unique index for the single root). That layout was designed for per-node editing, which is gone. It also
+avoids a known Hibernate pitfall when a tree is replaced: inserts are flushed before deletes, which broke the
+single-root index.
+
+The Java side barely changes: `GradingNode` stays the same class with the same fields, but stops being an entity. Its
+`@Entity`, `@Id`/`@GeneratedValue`, `@ManyToOne scheme`/`parent` and `@OneToMany children` mappings go, `children`
+stays a plain list, and the `@Embedded` reference and adjustment become plain nested objects. The `parent` back-pointer
+must go (Jackson would loop on it); nothing in the computation uses it. The cost is that flat queries over every node
+of a scheme are no longer SQL - they walk the tree in Java, which is fine at this size.
 
 ### GradingNode
 
@@ -66,15 +98,18 @@ names but not meaning. A typical case: a "practice" definition that lets student
 project, and a "final" one with similar tests using different values. Each needs its own subtree so the two can be
 weighted, ignored or flagged independently.
 
-The tree is **not** built at ingestion. Ingestion only keeps a local copy of the activity structure (see
-`Activity structure` below); the grading tree is teacher-owned and grows only through an explicit, add-only sync from
-that copy. Writing grading nodes at ingestion would either overwrite a tree the teacher has edited, or leave it
-incomplete, and would close the door to letting teachers reorganise the tree later.
+**Who builds the tree (rewritten 2026-10-22).** `srvc-activity-operator` generates the initial tree from the activity
+structure and the tests it discovered, and sends it whole in a `PutGradingSchemeCommand`. Every later edit is also a
+whole tree. `repo-grades` never builds or syncs nodes itself. (This replaces the earlier add-only sync from a local
+copy of the activity structure, and the teacher-triggered "regenerate" decided on 2026-10-16: both now belong to the
+operator, if anywhere.)
+
+Node ids are generated by the sender and kept stable across edits, so that `nodeResults` and overrides keep pointing
+at the same node after a scheme edit.
 
 ```
 GradingNode
-  id:                  UUID
-  scheme:              GradingScheme        // owning scheme, kept on every node for flat queries
+  id:                  UUID                 // generated by the operator, stable across edits
   label:               String
   reference:           NodeReference
   points:              double               // the node's own maximum, static across all students
@@ -84,8 +119,26 @@ GradingNode
   absenceBehavior:     AbsenceBehavior
   aggregation:         AggregationRule
   adjustment:          GradeAdjustment?     // non-null marks a bonus/malus node
+  pick:                Pick?                // SUBMISSION_DEF nodes only: LAST | BEST
   children:            List<GradingNode>
 ```
+
+### pick (added 2026-10-22)
+
+A group may have several submissions for one submission definition; `pick` says which one is graded: `LAST` (the most
+recent) or `BEST` (the highest success percent), the same values as `ActivityAggregate`'s `Pick`. It is set on
+`SUBMISSION_DEF` nodes only, since the pick strategy is per submission definition.
+
+It lives in the scheme rather than being read from `ActivityAggregate`, because ingesting the whole activity aggregate
+only for this field is not worth it. The operator copies the activity's value when it generates the tree, and the
+teacher may change it. The trade-offs:
+
+* The scheme's value can drift from the activity's if the activity is edited later. That is consistent with the rest
+  of the tree, which is also a teacher-owned snapshot of the activity structure.
+* Parts of the intranet that show students their "picked" submission follow the activity's value. If a teacher
+  changes `pick` in the scheme, the graded submission can differ from the one students see as picked.
+* `BEST` needs each job's success percent, so ingestion must keep it (`Job.successPercent`, or
+  `overrideSuccessPercent` when set) next to the trace address.
 
 ### points
 
@@ -210,8 +263,7 @@ GradeAdjustment
 
 The node resolves a test outcome like any other leaf. A `MALUS` fires when that test **fails**, a `BONUS` when it
 **passes**. An absent test never fires an adjustment, bonus or malus - which is exactly what makes the motivating case
-work with no extra machinery: a student with no trash files has no `TestResult` row for the trash-file test, so no
-malus fires.
+work with no extra machinery: a student with no trash files has no trash-file test in their trace, so no malus fires.
 
 Adjustments are stored as a **ratio**, not as absolute points. Absolute points would only be meaningful at the root
 ("-1 out of 20"), and applying the same adjustment at an interior node later would have no well-defined scale. A
@@ -237,108 +289,74 @@ NodeReference (sealed)
   AssignmentRef       { assignmentUri: String }
   SubmissionDefRef    { submissionDefUri: String }
   TestCategoryRef     { submissionDefUri: String, classname: String }
-  TestCaseRef         { submissionDefUri: String, discoveredTestId: UUID }
+  TestCaseRef         { submissionDefUri: String, classname: String, testName: String }
 ```
 
-All levels reference their intranet entity by URI, never by slug - URIs are the globally unique identifier here (see
-the `DiscoveredTest` key discussion below).
+All levels reference their intranet entity by URI, never by slug - URIs are the globally unique identifier here.
 
 `TestCategoryRef` carries the submission definition rather than the assignment: the same classname shows up under every
 submission definition running it, and each of those is a distinct category node.
 
-`TestCaseRef` references a `DiscoveredTest` by UUID to avoid dealing with the full composite key everywhere. Since
-`DiscoveredTest` is keyed on the submission definition, the test already implies it; `submissionDefUri` is kept on the
-reference anyway so computation can go straight from the node to the student's group and picked submission. Node
-references are immutable once created (set by sync), so the two cannot drift apart.
+**`TestCaseRef` (rewritten 2026-10-22)** references its test by plain text: `(submissionDefUri, classname, testName)`,
+the `<testcase classname="..." name="...">` attributes of the trace. There is no link to a test catalog:
+`repo-grades` keeps none, and test discovery belongs to the operator. A node may therefore reference a test that no
+trace contains yet; that is handled at computation time like any absent test. The earlier `DiscoveredTest` table and
+the `discoveredTestId` reference are gone.
 
-### Activity structure (local copy)
+Since the whole tree arrives with every edit, references are no longer immutable: a command can change any of them.
+Whatever must hold between them (e.g. a test's `submissionDefUri` matching its `SUBMISSION_DEF` ancestor) is the
+validator's job, see `grading-system-scheme-validator.md`.
 
-The only source of truth for activities is the Kafka `ActivityAggregate`; like every service, `srvc-grades` keeps a
-local copy of what it needs instead of calling other services. Each aggregate fully rewrites that copy: rows still
-present are upserted, rows gone from the aggregate are pruned.
+As the reference is in the Kafka messages, it is flattened there into a single class (a type enum plus nullable
+fields, as the persistence model already does) rather than a sealed hierarchy, which would need Jackson polymorphism
+annotations.
 
-```
-Activity              { uri, name }
-AssignmentGroup       { uri, activityUri, parentUri?, name, position }   // parentUri null for the root
-Assignment            { uri, activityUri, groupUri, name, position }
-SubmissionDefinition  { uri, activityUri, assignmentUri, slug, position, pick }   // + its GroupMembers
-```
+### Ingested data (rewritten 2026-10-22)
 
-`position` is the index among siblings in the aggregate, so the grading tree can follow the order of the activity.
-These tables use plain URI columns without foreign keys, like the rest of the copy: they mirror an aggregate already
-validated upstream, and foreign keys would only constrain the order of the prune/upsert steps.
+`repo-grades` ingests `SubmissionAggregate` and keeps only what computation needs: for each submission, its group and
+submission definition, and for its current job, the S3 address of the trace (`Job.traceUrl`, a raw S3 key used as-is)
+and the success percent `BEST` picking needs. A retried job (same `Job.id`, new `traceUrl`) simply updates the
+stored address.
 
-Two facts about the aggregate worth knowing, both guaranteed by `repo-activity`:
+It no longer keeps a local copy of the activity structure: the operator builds the tree, `pick` lives in the scheme,
+and groups are known through the submissions they made. The Activity / AssignmentGroup / Assignment /
+SubmissionDefinition / GroupMember tables, the `DiscoveredTest` catalog and the `TestResult` table are all dropped.
 
-* There is always a root group. A "flat" activity (a list of assignments, as PaCV2 allows) is wrapped in a synthetic
-  group with URI `<activityUri>/root`, named after the activity.
-* A group has assignments **or** subgroups, never both (rejected at activity creation).
+**Test results are parsed at computation time and never stored.** For each `SUBMISSION_DEF` node, the computation
+picks the group's submission, fetches its trace from S3, parses it, and looks the test nodes up by
+`(classname, testName)`. The doc previously argued for storing results at ingestion; the costs this choice now accepts:
 
-The copy is not used by grade computation, which only reads the scheme's tree; changing it marks no report stale.
+* Recomputing a report depends on the trace still being in S3. **To ask the team:** are traces ever purged?
+* Each computation fetches one trace per submission definition of the group: a few requests per report.
 
-### DiscoveredTest
+Many tests only appear in some traces (a trash-file test only appears when a trash file is found; when compilation
+fails the runtime suite never runs). This is normal and common, and is what `absenceBehavior` handles.
 
-Tests are not predefined - they are discovered from JUnit XML results produced by MaaS workers. Discovery happens synchronously at `SubmissionAggregate` ingestion: for each `Job` with status `RESULT_UPLOADED`, the trace at `traceUrl` is fetched and parsed, and one `DiscoveredTest` is upserted per distinct `(classname, testKey)` found. Re-ingestion of a retried job (same `Job.id`, new `traceUrl`) naturally re-triggers parsing, so no separate retry-detection mechanism is needed.
-
-```
-DiscoveredTest
-  id:              UUID
-  activityUri:      String
-  assignmentUri:    String
-  submissionDefUri: String
-  classname:        String    // <testcase classname="...">
-  testKey:         String    // <testcase name="...">
-  firstSeenAt:     Instant
-  lastSeenAt:      Instant
-  occurrenceCount: int
-```
-
-Natural (unique) key: `(submissionDefUri, classname, testKey)`. It was originally keyed on the assignment, but two
-submission definitions of one assignment may run different tests under the same name (practice vs final, see
-`GradingNode`); an assignment key merged them into one row, so sync could not tell which definition a test belongs to
-and `occurrenceCount`/`firstSeenAt`/`lastSeenAt` mixed both. This matches the test-name uniqueness assumption, which is
-already per submission definition. The cost is that a test shared by two definitions is two rows - which is the point.
-
-`activityUri` and `assignmentUri` are excluded from the key, since URIs on this intranet are globally unique strings
-built by concatenating parent URIs (`submissionDefUri` already embeds both), so they would add no uniqueness. They are
-kept as plain, non-key columns for activity- and assignment-wide queries (an `Exam` spans multiple assignments under one
-`activityUri`). All URI fields are stored verbatim (no parsing) — they're already available as-is on the loaded
-`SubmissionDefinitionModel` at ingestion time.
-
-A teacher can only reference a test in a scheme after at least one submission has produced it. The scheme validator rejects `TestCaseRef` pointing to an unknown `discoveredTestId`.
-
-Many tests only appear in some submissions (cheat detection, compilation errors/warnings, etc.) - this is expected. The `absenceBehavior` on the node handles the semantic for each case.
-
-`DiscoveredTest` is a dimension/catalog table, not a duplicate of `TestResult` below: it answers "does this test conceptually exist for this submission definition", independent of any one submission's outcome, and it is what `GradingNode.reference` (`TestCaseRef`) points to. Keeping it separate (rather than deriving the set of known tests live from `TestResult`) matters for two reasons: it stays resolvable even if older `TestResult` rows are later archived/pruned for space, and `firstSeenAt`/`lastSeenAt`/`occurrenceCount` are cheap reads for the scheme-authoring UI instead of a live aggregate over a potentially huge result table.
-
-### TestResult
-
-The actual per-submission outcome for one discovered test - persisted at ingestion time (see above), not re-derived from S3 traces at grade-computation time. One row per `(Job, DiscoveredTest)`.
-
-```
-TestResult
-  id:             UUID
-  discoveredTest: DiscoveredTest   // FK - test identity lives here, not duplicated as classname/testKey strings
-  jobId:          UUID
-  submissionId:   UUID
-  success:        boolean
-  failMessage:    String?
-```
-
-Storing all results at ingestion time (rather than re-parsing traces on every grade computation/recomputation) trades DB storage growth for: fast, repeatable grade computation that doesn't depend on S3 trace objects still existing or being reachable at compute time, and no repeated S3 load when a teacher recomputes a scheme multiple times while iterating on it.
+The operator parses the same traces for test discovery, so the two parsers must agree on what `classname` and
+`testName` are. A shared parsing helper in `framework-trace` would guarantee it.
 
 ### GradeReport
 
-Computed grade for one student on one scheme. There is a single report per `(scheme, studentLogin)` (unique index),
-overwritten on recomputation - keeping a report history would make little sense when the scheme itself keeps none.
-`activityUri` is a copy of the scheme's, kept so reports can be fetched by activity without loading the scheme.
+Computed grade for one **group** on one scheme *(changed 2026-10-16: submissions belong to groups, so every member
+gets the same grade; a student's grade is their group's)*. There is a single report per `(scheme, groupSlug)` (unique
+index), overwritten on recomputation - keeping a report history would make little sense when the scheme itself keeps
+none. `activityUri` is a copy of the scheme's, kept so reports can be fetched by activity without loading the scheme.
+
+> Open (to ask the team): groups are per submission definition, and a scheme spans several definitions, so a student
+> could be in different groups for different definitions (e.g. solo practice, pair final). One report per group
+> assumes this never happens within one scheme.
+
+`repo-grades` has no list of an activity's groups, so it cannot tell an unknown group from a registered one that never
+submitted: both have no submission at all. Such a report is still computed, every `SUBMISSION_DEF` node is absent and
+its `absenceBehavior` decides. This is correct for a group that did not submit, as long as submission definitions
+default to `FAIL`. Mapping a group to its members is left to the operator, which knows the groups.
 
 ```
 GradeReport
   id:            UUID
   schemeId:      UUID
   schemeVersion: int
-  studentLogin:  String
+  groupSlug:     String
   activityUri:   String
   computedAt:    Instant
   finalGrade:    double     // pure tree computation, adjustments NOT included
@@ -360,18 +378,32 @@ see that it was 19 minus 2 for trash files. Note the clamp is applied at export 
 record a `finalGrade + adjustmentTotal` above `finalMax` or below zero.
 
 ```
-enum ReportStatus { FRESH | STALE | COMPUTING | FAILED }
+enum ReportStatus { FRESH | STALE | FAILED }
 ```
+
+`COMPUTING` was dropped (2026-10-22): a computation runs inside the handler of its Kafka command, and the report it
+publishes is committed in the same transaction, so no consumer could ever see a `COMPUTING` report.
 
 Recomputation is asynchronous and frontend-triggered. A report is outdated in two distinct cases, and the last known
 grade stays visible but flagged until the frontend requests a recomputation:
 
 - **The scheme changed**: `report.schemeVersion != scheme.version`. Derived, so nothing is written when a scheme is
-  edited and it cannot drift.
-- **The student's data changed**: a new submission or job arrived after the computation. Ingestion sets
-  `status = STALE` on the affected students' reports.
+  edited and it cannot drift. The operator can derive it from the two aggregates it holds.
+- **The group's data changed**: a new submission or job arrived after the computation.
 
-A student may have multiple submissions for the same assignment. The grading service always picks the canonical one using the activity's existing `pickStrategy`.
+> Open: how data staleness is managed is undecided; the `STALE` value is kept until then. `repo-grades` ingests
+> submissions, so it could still set `STALE` itself and republish the report. Alternatively the report records which
+> submission and job it was computed from, and the operator compares that with the current ones.
+
+**`FAILED`.** A failed computation must still publish a report, or the operator never learns about it. In a Kafka
+consumer, throwing aborts the transaction and its outgoing messages, so the compute handler has to catch the failure,
+mark the report `FAILED` and publish it *without* rethrowing. This differs from the earlier synchronous version
+(2026-10-02), which rethrew so the error reached the HTTP response. Since the report is updated in place, a `FAILED`
+report keeps the results of its last successful computation; an error code is worth adding so the operator can tell
+the teacher why it failed (the earlier "logs suffice" reasoning relied on the HTTP response).
+
+A group may have multiple submissions for the same submission definition. The computation picks the graded one using
+the `pick` of the `SUBMISSION_DEF` node.
 
 ### NodeResult
 
@@ -398,6 +430,15 @@ It takes no part in its parent's ratio.
 `NO_ASSESSABLE_CHILD` marks an aggregating node excluded because none of its children was left to score (all
 ignored, absent-ignored or adjustments).
 
+**Overrides (2026-10-22).** An override is set by its own command (`PutGradeOverrideCommand`); `repo-grades` stores it
+in the report and publishes the updated report. Overrides live in the report only, so **a recomputation discards
+them** - an accepted trade-off for now. The operator mitigates it: it sees the overrides in the last report it
+received, and can warn or refuse before sending a computation for a report that has some.
+
+> Open: how an override affects the rest of the report. If it only replaces the node's score for display, parents and
+> `finalGrade` stay unchanged. If it counts, parents must be re-aggregated - possible from the stored `nodeResults`
+> alone, without re-parsing traces.
+
 ## Grade Computation Algorithm
 
 Bottom-up (leaves first). Every node produces a ratio, and `score = node.points x ratio`:
@@ -405,8 +446,8 @@ Bottom-up (leaves first). Every node produces a ratio, and `score = node.points 
 1. If `ignored` is set, the node and its whole subtree are excluded. Stop.
 2. If the node carries an `adjustment`, it is excluded from its parent and evaluated separately. Stop.
 3. If no data exists for this node, apply `absenceBehavior`. If `IGNORE`, the node is excluded. Stop.
-4. Leaf nodes: read the `TestResult` row for the `DiscoveredTest` referenced by the node's `TestCaseRef`. ratio is
-   `1.0` on success, `0.0` on failure.
+4. Leaf nodes: find the test `(classname, testName)` of the node's `TestCaseRef` in the parsed trace of the group's
+   picked submission for `submissionDefUri`. ratio is `1.0` on success, `0.0` on failure.
 5. Non-leaf nodes: derive the ratio from the non-excluded children with the node's `aggregation` rule. A node left
    with no non-excluded child is itself excluded.
 6. `score = node.points x ratio`.
@@ -421,6 +462,135 @@ Then, once the whole tree is scored:
 
 `finalGrade` and `adjustmentTotal` are recorded separately; they are combined and clamped only at export time.
 
+## Kafka Communication
+
+The present document has described the data model used to store grades, grading schemes and nodes. 
+This app is the official source of truth for these data, it must send their values through Kafka and receive commands
+to allow other apps to modify the data.
+
+### Aggregates
+
+*(Fields drafted 2026-10-22, to be reviewed.)* Messages live in `exchange/`, aggregates under
+`aggregate/<domain>/v001` with `@Version(1)`, commands under `command/` implementing `Command`. Remember that the Kafka
+topic is built from the class's fully qualified name and version: renaming or moving a class changes its topic.
+
+Each command carries a `commandId` generated by the sender, and each aggregate echoes the last one it applied as
+`lastCommandId`. Commands get no reply, so this is how the operator knows its command was applied ("saved" vs "still
+pending"). It does not report rejections; how command errors reach the teacher is still to be asked to the team.
+
+Commands are sent with a random Kafka key, so two commands on the same scheme have no ordering guarantee. Aggregates
+are keyed by `getId()`, so all versions of one aggregate arrive in order.
+
+### Aggregates
+
+In order to describe grading schemes and grades, two aggregates are needed. Each is a full snapshot of its entity,
+republished whole on every change.
+
+**GradingSchemeAggregate**: `Aggregate<UUID>`, keyed by the scheme id:
+
+```
+GradingSchemeAggregate:
+  id:            UUID
+  activityUri:   String
+  version:       int             // bumped on every accepted PutGradingSchemeCommand
+  finalMax:      double
+  root:          Node
+  createdAt:     ZonedDateTime
+  updatedAt:     ZonedDateTime
+  updatedBy:     String          // login of the last editor, from the command's InboundContext
+  lastCommandId: UUID
+
+Node                             // nested class, reused by PutGradingSchemeCommand
+  id:                  UUID
+  label:               String
+  reference:           Reference
+  points:              double
+  validationThreshold: double
+  mandatory:           boolean
+  ignored:             boolean
+  absenceBehavior:     IGNORE | PASS | FAIL
+  aggregation:         SUM | AVERAGE | MIN_CHILD | MAX_CHILD
+  adjustment:          { kind: BONUS | MALUS, ratio: double }?
+  pick:                LAST | BEST?   // SUBMISSION_DEF only
+  children:            List<Node>
+
+Reference                        // flattened: a type plus the fields that type uses
+  type:             ROOT | ASSIGNMENT_GROUP | ASSIGNMENT | SUBMISSION_DEF | TEST_CATEGORY | TEST_CASE
+  uri:              String?   // ASSIGNMENT_GROUP, ASSIGNMENT, SUBMISSION_DEF
+  submissionDefUri: String?   // TEST_CATEGORY, TEST_CASE
+  classname:        String?   // TEST_CATEGORY, TEST_CASE
+  testName:         String?   // TEST_CASE
+```
+
+**GradeReportAggregate**: `Aggregate<UUID>`, keyed by the report id, one per `(scheme, groupSlug)`, updated in place:
+
+```
+GradeReportAggregate:
+  id:              UUID
+  schemeId:        UUID
+  schemeVersion:   int
+  activityUri:     String
+  groupSlug:       String
+  status:          FRESH | STALE | FAILED
+  errorCode:       String?        // set when FAILED
+  computedAt:      ZonedDateTime  // last successful computation
+  finalMax:        double
+  finalGrade:      double         // adjustments not included
+  adjustmentTotal: double
+  nodeResults:     List<NodeResult>   // { nodeId, score, validated, absenceStatus, override? }
+  lastCommandId:   UUID
+```
+
+A whole exam tree down to its test cases can hold thousands of nodes, and a report carries one result per node. Both
+messages can get large: `repo-events` already raises `max.partition.fetch.bytes` to consume `ActivityAggregate`, and
+the operator's consumers will likely need the same.
+
+### Commands
+
+In order to allow other apps to modify this repo's data, some commands are also needed:
+
+**PutGradingSchemeCommand** to change or create a grading scheme and its associated grading nodes:
+
+```
+PutGradingSchemeCommand:
+  commandId:       UUID
+  schemeId:        UUID      // generated by the sender on creation
+  activityUri:     String
+  expectedVersion: Integer?  // null = create; otherwise rejected if it differs from the current version
+  finalMax:        double
+  root:            Node      // the whole tree, replaces the stored one
+```
+
+`expectedVersion` protects against two concurrent edits, and against the missing ordering between commands. The
+author does not need a field: the framework propagates the login in the message's `InboundContext`.
+
+**GradeComputationCommand** to start computation of a grade for a group on a scheme:
+
+```
+GradeComputationCommand:
+  commandId: UUID
+  schemeId:  UUID
+  groupSlug: String
+```
+
+It computes against the scheme's current version, which the report records. Computing a whole activity is one command
+per group, sent by the operator.
+
+**PutGradeOverrideCommand** to apply an override on a grade report:
+
+```
+PutGradeOverrideCommand:
+  commandId: UUID
+  reportId:  UUID
+  nodeId:    UUID
+  score:     double?   // null removes the override
+  reason:    String
+```
+
+As for the scheme, the author and date come from the message context.
+
+
+
 ## Out of Scope (for now)
 
 * Workshop grading (last-reached strategy, notion-based scoring)
@@ -429,6 +599,9 @@ Then, once the whole tree is scored:
 * Automatic recomputation on scheme change
 * Applying a bonus/malus at an arbitrary level of the tree rather than to the final grade
 * Several distinct tests sharing one name inside a submission definition (see Assumptions)
+* History of schemes and reports (2026-10-22: consumers keep only the last aggregate received)
+* Deleting a scheme or a report (the project's way, when needed, is a soft delete with a `deletedAt` field)
+* Keeping overrides across a recomputation
 
 ## Assumptions
 
