@@ -1,7 +1,7 @@
 - [Staging DB access](staging_db_access.md) — kube-switcher `switch` for context + `-n <namespace>` needed for kubectl port-forward
 - [Confirm before editing](feedback_confirm_edits.md) — ask before any file edits in this repo, even in auto-mode
-- [srvc-grades app state](project_srvc_grades.md) — branch 44-srvc-grades-new-app: reworking into repo-grades (Kafka-only); 2026-10-22 decided live trace parsing, no history, overrides lost on recompute; read LocalDocs design docs first
-- [framework-trace / S3 trace fetch](reference_framework_trace.md) — Xml.deserialize(_, Trace.class); job.traceUrl is a raw S3 key, use as-is
+- [repo-grades (ex srvc-grades) state](project_srvc_grades.md) — rework done 2026-10-23 (apps/repo-grades, Kafka-only); operator side next; read LocalDocs design docs first
+- [framework-trace / S3 trace fetch](reference_framework_trace.md) — Xml.deserialize(_, Trace.class); traceUrl is a raw S3 key; TestUris + testCasesByUri name tests by URI
 - [Intranet URI/slug convention](reference_intranet_uri_convention.md) — URIs globally unique, built from parent URI + slug; don't double-key on both
 - [Testcontainers Docker API fix](project_testcontainers_docker_api_version.md) — JDK_JAVA_OPTIONS="-Dapi.version=1.41" needed for @QuarkusTest devservices on this machine
 - [Hibernate persist-ordering gotcha](project_hibernate_persist_ordering_gotcha.md) — set fields before persist(); EntityManager L1 cache spans @Transactional calls in one test
@@ -14,3 +14,6 @@
 - [Intranet permission pattern](reference_intranet_permission_pattern.md) — tenant perms come via framework-auth (`AuthService.currentUserHasTenantPermission`); only activity managers are hand-rolled
 - [IDEA SDK /nix/store paths](reference_idea_nix_jdk_paths.md) — IDE red everywhere but mvnw OK → SDK homePath in jdk.table.xml points at a /nix/store path missing on this host
 - [Spec-driven tests](feedback_spec_driven_tests.md) — write tests from the agreed spec, not the user's code; report failures as design questions
+- [Team git convention](reference_team_git_convention.md) — rebase on main, not merge; commits are YubiKey-signed, so the user runs rebase/commit/remote commands
+- [Comment style](feedback_comment_style.md) — short human-sounding comments/javadocs; never reference LocalDocs from code
+- [Framework Kafka transactions](reference_framework_kafka_transactions.md) — PublisherService needs @Transactional (not QuarkusTransaction); same-bean calls skip the interceptor; KafkaCompanion test pattern
