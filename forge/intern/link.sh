@@ -27,6 +27,14 @@ fi
 
 ln -s $SCRIPT_DIR/exclude ./.git/info/exclude
 
+if [[ -f ./.git/hooks/prepare-commit-msg && ! -L ./.git/hooks/prepare-commit-msg ]]; then
+    mv ./.git/hooks/prepare-commit-msg ./.git/hooks/prepare-commit-msg.old
+    echo "Old prepare-commit-msg hook backuped !"
+fi
+
+ln -sf $SCRIPT_DIR/hooks/prepare-commit-msg ./.git/hooks/prepare-commit-msg
+echo "Linked sign-off hook"
+
 if [[ -d ./LocalDocs && ! -L ./LocalDocs ]]; then
     rm -rf ./LocalDocs
     echo "Removed existing LocalDocs directory"

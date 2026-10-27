@@ -30,6 +30,7 @@
               pkgs.git                      # Version control
               pkgs.curl                     # HTTP client for API testing
               pkgs.jq                       # JSON processor (useful for API responses)
+              pkgs.glab
 
               # Optional
               pkgs.which                    # Utility to locate programs

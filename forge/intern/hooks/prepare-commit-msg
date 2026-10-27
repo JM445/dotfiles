@@ -1,0 +1,6 @@
+#!/bin/sh
+# Forge requires a Signed-off-by trailer on every commit, and git has no config for it.
+# addIfDifferent keeps it from being duplicated (amend, commit -s, other people's sign-offs).
+
+ident=$(git var GIT_COMMITTER_IDENT | sed 's/>.*/>/')
+git interpret-trailers --in-place --if-exists addIfDifferent --trailer "Signed-off-by: $ident" "$1"
