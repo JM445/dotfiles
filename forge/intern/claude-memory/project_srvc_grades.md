@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: fae214b5-629f-418f-8d3b-014f1f385228
-  modified: 2026-10-23T15:58:46.860Z
+  modified: 2026-10-28T14:56:07.512Z
 ---
 
 **Read `LocalDocs/grading-system-data-model-design-decisions.md` and `LocalDocs/grading-system-scheme-validator.md`
@@ -26,6 +26,15 @@ commands are run by the user, see [[reference_team_git_convention]]). 109 tests 
   live at computation, never stored; one report per (scheme, group); absence descends to an absent node's
   descendants; overrides re-run the calculator on stored results (`TestOutcomes.ofResults`) and are lost on
   recomputation; scheme validation runs in the repo on reception AND in the operator before sending (team decision).
+
+**MR review fixes (2026-10-28, committed):** LAST now picks the most recent submission *with a current job*, like
+BEST (quota-rejected/errored/in-flight submissions are skipped instead of grading 0). `isCurrent` deliberately just
+mirrors repo-submission's full-snapshot aggregates; user declined a local "one current job" safety net. A submission
+can end up with no current job here (e.g. preparing switch strategy, or switched to a failed job), and that's accepted:
+grading happens long after jobs finish, and the user prefers predictable mirroring to extra assumptions. Don't re-propose it.
+Also committed + pushed 2026-10-28: job change detection includes the trace's S3 ETag (`JobModel.traceEtag`, via
+`statObject`), because operator "Retry Job" (`RetryJobCommand` → `JobService.retry`) re-runs a finished job in place
+under the same trace key. `trace_etag` was added to V1 directly (app never deployed). More MR review comments remain.
 
 **Next piece of work: the srvc-activity-operator side** - build the initial tree, test discovery (with TestUris /
 testCasesByUri), REST endpoints (`LocalDocs/Endpoints.md` is now the operator endpoint spec, written before the pivot),

@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 10b2b0f7-23c6-4096-b45e-6a024b8057ae
-  modified: 2026-08-25T13:10:00.000Z
+  modified: 2026-10-28T13:59:47.995Z
 ---
 
 The Forge monorepo (`/home/jm445/Documents/Forge/intern`) uses the Maven build-cache extension, configured at `.mvn/maven-build-cache-config.xml`. Two symptoms observed in the same debugging session, both root-caused to the same defect, first hit on `apps/srvc-grades` (branch 44-srvc-grades-new-app) after editing `pom.xml` (removing then re-adding an `assertj-core` dependency):
@@ -27,4 +27,6 @@ The Forge monorepo (`/home/jm445/Documents/Forge/intern`) uses the Maven build-c
 This is a local, non-invasive workaround — did not touch `.mvn/maven-build-cache-config.xml` itself, since that's a shared repo-level config affecting every app; changing it wasn't warranted for a single-session local cache staleness issue.
 
 **Why:** cost real confusion time — the install error message ("did not assign a file to the build artifact") and the "No tests to run" message both look like real build/config problems, give no hint that a stale local build-cache entry is the actual cause. Not specific to `srvc-grades` — the cache config is repo-wide, so any app could hit this after a pom.xml edit.
+**Related, different symptom (2026-10-28):** `mvnw -pl apps/repo-grades test` (even with `-am`) can fail with "Could not find artifact fr.epita.forge.toolkit:framework-core:jar:X-SNAPSHOT" / Quarkus `generate-code-tests` failing to resolve `exchange` SNAPSHOT. Quarkus codegen resolves from `~/.m2`, not the reactor — fix: first `./mvnw -pl apps/<app> -am install -DskipTests -Dmaven.build.cache.skipCache=true`, then run the app's tests.
+
 **How to apply:** When a Maven command in this repo fails with either of those two symptoms right after editing a `pom.xml` (especially adding/removing dependencies), try `-Dmaven.build.cache.skipCache=true` before digging into the pom or the code — check `~/.m2/build-cache` staleness first, not the dependency change itself. Related: [[project_srvc_grades]] for the session this was discovered in, [[project_testcontainers_docker_api_version]] for another local-machine-only build quirk in this repo, [[project_claude_memory_flake_link]] for how this repo's own Claude Code memory storage is wired up (relevant context for where this file itself lives).
