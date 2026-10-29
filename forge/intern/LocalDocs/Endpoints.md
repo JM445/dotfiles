@@ -14,9 +14,6 @@ This includes:
   - Updating an existing GradingScheme
   - Listing schemes
   - Getting a scheme
-  - Delete a scheme and all its reports & associated nodes
-  - Getting all grading nodes associated to a scheme
-  - Sync the associated grading_node tree to the scheme (add-only)
   - Get student list for a scheme
 
 - Grading Nodes

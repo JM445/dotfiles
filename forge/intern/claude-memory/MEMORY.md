@@ -20,3 +20,4 @@
 - [Outline wiki connector](reference_outline_wiki.md) — wiki.forge.epita.fr via "EPITA Internal Wiki" MCP; team docs in Forge - Interne; read-only unless asked
 - [Intern release process](reference_intern_release_process.md) — only apps/ poms get bumped; exchange/frameworks auto-deploy on main; release = drop SNAPSHOT + tag after merge, then dev-mode bump
 - [GitLab via glab](reference_gitlab_glab.md) — glab only in devshell (direnv exec); fine-grained token: REST ok, no GraphQL/report artifacts; new apps inflate dependency-scan "new" findings
+- [Validation precedents](reference_validation_precedents.md) — activity YAML validated only in repo-activity (sync REST + dry-run); achievement/restriction commands only in operator; nothing validates both ends
