@@ -15,7 +15,7 @@
 - [IDEA SDK /nix/store paths](reference_idea_nix_jdk_paths.md) — IDE red everywhere but mvnw OK → SDK homePath in jdk.table.xml points at a /nix/store path missing on this host
 - [Spec-driven tests](feedback_spec_driven_tests.md) — write tests from the agreed spec, not the user's code; report failures as design questions
 - [Team git convention](reference_team_git_convention.md) — rebase on main, not merge; commits are YubiKey-signed, so the user runs rebase/commit/remote commands
-- [Comment style](feedback_comment_style.md) — short human-sounding comments/javadocs; never reference LocalDocs from code
+- [Comment style](feedback_comment_style.md) — short factual comments/javadocs; no design/team decisions, future plans or memory refs; never LocalDocs
 - [Framework Kafka transactions](reference_framework_kafka_transactions.md) — PublisherService needs @Transactional (not QuarkusTransaction); same-bean calls skip the interceptor; KafkaCompanion test pattern
 - [Outline wiki connector](reference_outline_wiki.md) — wiki.forge.epita.fr via "EPITA Internal Wiki" MCP; team docs in Forge - Interne; read-only unless asked
 - [Intern release process](reference_intern_release_process.md) — only apps/ poms get bumped; exchange/frameworks auto-deploy on main; release = drop SNAPSHOT + tag after merge, then dev-mode bump

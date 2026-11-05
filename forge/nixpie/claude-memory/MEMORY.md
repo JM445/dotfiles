@@ -1,0 +1,3 @@
+- [Nixpie repo layout](nixpie-repo-layout.md): images/modules/pkgs structure, how custom pkgs are registered
+- [Nixpie Python & Jupyter](nixpie-python-jupyter.md): cri.packages.pythonPackages becomes one withPackages env shared with Jupyter
+- [Nixpie conventions](nixpie-conventions.md): commit prefix style, python derivation template

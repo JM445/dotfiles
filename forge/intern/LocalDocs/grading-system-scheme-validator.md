@@ -6,22 +6,27 @@ A `GradingScheme` is authored by teachers through the frontend, and most of the 
 walks is well-formed. Rather than scattering defensive checks through `GradeCalculator`, the intent is a single
 validation pass that a scheme must clear before it can be stored, and so before it can be used to compute anything.
 
-*(2026-10-23)* The validator is **implemented** in repo-grades as `GradingSchemeValidator`; see "Implementation" at
-the end of this file for how the rules below map to it. Every rule below came out of an actual design decision - the
+*(2026-10-30)* The validator was implemented in repo-grades as `GradingSchemeValidator`, then **removed** from it
+(commit `1b451cd`) to move to `srvc-activity-operator`; see "Implementation" at the end of this file. Its rules for test
+levels change with nested categories (see "References"). Every rule below came out of an actual design decision - the
 rationale is kept so that a rule is never dropped just because its reason was forgotten.
 
 Companion to `grading-system-data-model-design-decisions.md`, which defines the model these rules constrain.
 
 ## When it should run
 
-**Team decision (2026-10-23):** validation runs **twice**: in `srvc-activity-operator` before it sends a
-`PutGradingSchemeCommand`, so the teacher gets the errors, and again in `repo-grades` on reception, to catch what
-changed in between (commands are asynchronous). A scheme failing validation is **rejected**, not saved as a draft:
-`repo-grades` throws `INVALID_SCHEME` listing every violation, nothing is stored or published, and the subscriber logs
-it.
+**Team decision (2026-10-29):** validation runs **only in `srvc-activity-operator`**, before it sends a
+`PutGradingSchemeCommand`, so the teacher gets the errors as a REST response. A scheme failing validation is
+**rejected**, not saved as a draft, and no command is sent. The operator also exposes the validation as a dry run.
 
-`repo-grades` no longer holds the activity structure or a test catalog, so it can only check what the tree says about
-itself. Whether references point at entities that still exist can only be checked by the operator, which owns both.
+This follows the codebase's precedent: asynchronous commands are validated by their sender, the only side that can
+answer the user (achievements, activity restrictions). `repo-grades` stores whatever tree it receives; a malformed one
+fails at computation and gives a `FAILED` report.
+
+*(Superseded, 2026-10-23: validation ran twice, in the operator and again in `repo-grades` on reception.)*
+
+The operator holds the activity structure and the test catalog, so besides what the tree says about itself it can
+check that references point at entities that still exist.
 
 ## Rules
 
@@ -38,7 +43,7 @@ construction and were removed.
 | The root node has type `ROOT`, and no other node does | The root stands for the activity; a `ROOT` deeper in the tree is meaningless |
 | The root's URI equals the scheme's `activityUri` | The root uses the activity's URI, and the scheme is looked up by it |
 | The root has at least one non-excluded child | A scheme whose children are all ignored or all adjustments has every child excluded, so the root is excluded too and no grade can be produced |
-| Node reference types follow the hierarchy: `ROOT` > `ASSIGNMENT_GROUP` (any depth, optional) > `ASSIGNMENT` > `SUBMISSION_DEF` > `TEST_CATEGORY` > `TEST_CASE` | The model assumes this ordering; a `TEST_CASE` with children, or an `ASSIGNMENT` under a `TEST_CASE`, is meaningless |
+| Node reference types follow the hierarchy: `ROOT` > `ASSIGNMENT_GROUP` (any depth, optional) > `ASSIGNMENT` > `SUBMISSION_DEF` > `TEST_CATEGORY` (any depth, optional) > `TEST_CASE`. A `TEST_CATEGORY` may hold both categories and test cases; a `TEST_CASE` sits under a `TEST_CATEGORY` or a `SUBMISSION_DEF`, never higher | The model assumes this ordering; a `TEST_CASE` with children, or an `ASSIGNMENT` under a `TEST_CASE`, is meaningless. A test always comes from a submission, so it cannot sit above its submission definition |
 
 ### References (rewritten 2026-10-23)
 
@@ -49,8 +54,8 @@ A node's reference is `type + uri`, and the URI is the node's id (see `NodeRefer
 |----|----|
 | Every node has a non-blank `type` and `uri` | The URI is the node's id: `nodeResults` and overrides are keyed by it |
 | No two nodes of a scheme share a URI | Two nodes would share one `NodeResult` and one override. It also means an entity appears at most once, e.g. a test cannot be both a scored node and an adjustment node |
-| Every non-root node's URI starts with its parent's URI + `/` | Intranet URIs nest (parent URI + `/` + slug) and test URIs extend their submission definition's. This replaces the earlier "a test's `submissionDefUri` matches its `SUBMISSION_DEF` ancestor" rule: a test placed under the wrong definition would be looked up in the wrong trace and silently graded absent |
-| A `TEST_CATEGORY` URI adds exactly one segment to its parent's, a `TEST_CASE` URI exactly one to its category's | Test names are percent-encoded so they hold no `/`; an extra segment means the URI was not built by the shared `testCaseUri` function and will never match a trace |
+| Every non-root node's URI starts with its parent's URI + `/` (structural levels, categories) or with its parent's URI + `/` or `#` (test cases) | Intranet URIs nest (parent URI + `/` + slug) and test URIs extend their submission definition's. This replaces the earlier "a test's `submissionDefUri` matches its `SUBMISSION_DEF` ancestor" rule: a test placed under the wrong definition would be looked up in the wrong trace and silently graded absent |
+| *(2026-10-30, nested categories)* A `TEST_CATEGORY` URI holds no `#` and extends its parent's by one or more `/` segments. A `TEST_CASE` URI holds exactly one `#`, with no `/` after it | Classname parts and test names are percent-encoded, so neither holds a `/` or a `#`. A test or category may sit under any ancestor in its path (flattened trees, merged single-child chains): its URI only says what it grades. Replaces "a category or test case URI adds exactly one segment", which assumed flat categories |
 | A referenced intranet entity exists (assignment group, assignment, submission definition) | Only checkable by the operator, which knows the activity structure. A node pointing at a deleted entity is graded absent |
 
 ### Flags and fields
@@ -94,14 +99,15 @@ as a direction rather than a plan.
 
 * The object at `traceUrl` parses as JUnit XML (`Xml.deserialize(raw, Trace.class)` does not throw). Today a
   malformed trace surfaces as an exception in the middle of `ingestTrace`, inside the ingestion transaction.
-* Every `<testcase>` carries a non-empty `classname` and `name`. Both go into the test's URI, so an empty one gives a
-  URI no scheme can meaningfully reference.
+* Every `<testcase>` carries a non-empty `name`. *(2026-10-30)* A missing or blank `classname` is accepted: the test
+  then sits directly under its submission definition (`<sd>#name`).
 * The trace is non-empty when the job reported `RESULT_UPLOADED`. A job that claims to have results but produced no
   test case is a worker problem, and every node pointing at it silently falls into `absenceBehavior`.
 
 **Identity - the assumptions the grading model relies on**
 
-* No two `<testcase>` entries in one trace share the same `(classname, name)`. This is the enforcement point for the
+* No two `<testcase>` entries in one trace share the same URI, i.e. the same `name` and the same `classname` once its
+  empty parts are skipped (`a..b` is `a.b`). Enforced when a trace is read (`DUPLICATE_TEST_CASE`). This is the enforcement point for the
   test-name uniqueness assumption the data model adopted: a trace is the only place a duplicate is actually
   observable, and `DiscoveredTest` silently collapses duplicates into one row today.
 * Depending on how strictly the assumption is read, also: no two entries share the same `name` across different
@@ -149,26 +155,34 @@ Two further things to settle before any of this:
 
 ## Open questions
 
-* Should `GradingSchemeValidator` move to a module both `repo-grades` and `srvc-activity-operator` use, so that the
-  two validations run the same rules? To be decided with the team.
+None at the moment.
+
+Settled on 2026-10-29: no shared module, the validator moves to `srvc-activity-operator` and runs only there.
 
 Settled on 2026-10-23:
 
 * Reject or save as a draft: **reject** (see "When it should run").
-* Which app checks what: both run the tree rules (team decision); only the operator can check that referenced
-  entities exist. A rejection reaches the teacher through the operator's own validation, before the command is sent;
+* *(Superseded on 2026-10-29: only the operator validates.)* Which app checks what: both run the tree rules (team
+  decision); only the operator can check that referenced entities exist. A rejection reaches the teacher through the operator's own validation, before the command is sent;
   a rejection in `repo-grades` is only logged, and its sender sees that the scheme's `lastCommandId` did not move.
 * Test-name uniqueness: on both sides, `DUPLICATE_URI` in the scheme and `DUPLICATE_TEST_CASE` when a trace is read
   (see "Implementation").
 * Error shape: a collected list of `(nodeUri, Rule)` violations, which `repo-grades` reports as one `INVALID_SCHEME`
   error (a `GradesErrorCodes` entry) listing them all.
 
-## Implementation (2026-10-23)
+## Implementation (2026-10-23, removed from repo-grades 2026-10-30)
+
+The code lives in git: `git show 1b451cd^:apps/repo-grades/src/main/java/fr/epita/forge/repo/grades/domain/service/GradingSchemeValidator.java`
+(and `.../src/test/.../GradingSchemeValidatorTest.java`). To be brought into `srvc-activity-operator` with these
+changes for nested categories:
+
+* `ALLOWED_CHILDREN`: `SUBMISSION_DEF` and `TEST_CATEGORY` both hold `{TEST_CATEGORY, TEST_CASE}`.
+* `TEST_URI_NOT_ONE_SEGMENT` is replaced by the two URI rules of "References" above.
+* The `INVALID_SCHEME` error code went away with it; the operator reports violations through its own REST error.
 
 `GradingSchemeValidator.validate(PutGradingSchemeCommand)` returns every violation, as `(nodeUri, Rule)` pairs (a null
 `nodeUri` for scheme-level rules), rather than stopping at the first, so that the operator can show them all. It
-depends on nothing but the exchange messages, so it can move to a module the operator also uses, which would make the
-two validations one set of rules called from two places. Whether to do so is for the team to decide.
+depends on nothing but the exchange messages.
 
 How the rules above map to `Rule`, and how they changed while implementing:
 

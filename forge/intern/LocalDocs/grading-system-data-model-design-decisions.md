@@ -11,6 +11,8 @@ and grade reports. Its Kafka messages live in `exchange` under `fr.epita.forge.g
 * `srvc-activity-operator` builds the grading tree and owns test discovery. `repo-grades` keeps no test catalog: a test
   node references its test by a URI built from the trace's names.
 * Nodes are identified by the URI of what they grade.
+* Schemes are validated **only by the operator**, before sending (team decision, 2026-10-29). `repo-grades` stores
+  whatever tree it receives; a malformed one fails at computation and gives a `FAILED` report.
 * `repo-grades` ingests `SubmissionAggregate` and keeps, for each job, the S3 address of its trace. Traces are parsed
   **at computation time and never stored**.
 * No history: neither schemes nor reports keep past versions, and consumers keep only the last aggregate they received.
@@ -21,9 +23,9 @@ Exams and Projects only for now. Workshop grading is out of scope, but the model
 later.
 
 * **Exam**: several independent assignments or assignment groups, aggregated recursively.
-  AssignmentGroup → Assignment → SubmissionDefinition → TestCategory → TestCase
+  AssignmentGroup → Assignment → SubmissionDefinition → TestCategory* → TestCase
 * **Project**: a single assignment defines the final grade.
-  Assignment → SubmissionDefinition → TestCategory → TestCase
+  Assignment → SubmissionDefinition → TestCategory* → TestCase
 
 ## Core Entities
 
@@ -65,9 +67,14 @@ Activity root
   L---- AssignmentGroup   (optional)
         L---- Assignment
               L---- SubmissionDefinition
-                    L---- TestCategory
+                    L---- TestCategory   (optional, nests to any depth)
                           L---- TestCase
 ```
+
+Test categories come from the dotted classnames of the trace: `parser.lexer` is a `lexer` category inside a `parser`
+one. A category may hold test cases and sub-categories side by side, and a test case may sit directly under its
+submission definition (a test without classname, or a flattened tree). Tests and categories can only live under a
+submission definition: a test always comes from a submission.
 
 The `SubmissionDefinition` level exists because an assignment may declare several definitions running tests that
 share names but not meaning (e.g. a "practice" definition students run during the project, and a "final" one with
@@ -229,15 +236,30 @@ as-is; the root uses the activity's URI. Intranet URIs are parent URI + `/` + sl
 path and nested assignment groups need no special handling. Always URIs, never slugs.
 
 **Test levels** are not intranet entities, so their URI is built from the trace's
-`<testcase classname="..." name="...">` attributes:
+`<testcase classname="..." name="...">` attributes. The classname is split on `.`, each part being one category
+segment, and the test name follows a `#`:
 
 ```
-TEST_CATEGORY  <submissionDefUri>/<enc(classname)>
-TEST_CASE      <submissionDefUri>/<enc(classname)>/<enc(testName)>
+classname "parser.lexer", name "tokens"
+  TEST_CATEGORY  <submissionDefUri>/parser
+  TEST_CATEGORY  <submissionDefUri>/parser/lexer
+  TEST_CASE      <submissionDefUri>/parser/lexer#tokens
+
+no classname, name "make"
+  TEST_CASE      <submissionDefUri>#make
 ```
 
-`enc` is UTF-8 percent-encoding of the whole segment, `/` included, so a `/` in a test name never reads as a
-separator. Categories hang off the submission definition: the same classname under two definitions gives two nodes.
+* Each classname part and the test name are UTF-8 percent-encoded, so neither `/` nor `#` can appear inside one. A
+  test case URI holds exactly one `#`, a category URI none.
+* The `#` keeps tests and categories apart: classname `a` + test `b` gives `<sd>/a#b`, classname `a.b` gives `<sd>/a/b`.
+  Joining both with `/` would have made them collide.
+* Empty classname parts are skipped (`a..b`, `.a.b.` are `a.b`), and a missing or blank classname is no classname. Two
+  test cases that end up with the same URI this way make the trace a duplicate (`DUPLICATE_TEST_CASE`).
+* Categories hang off the submission definition: the same classname under two definitions gives two nodes.
+* A node's URI only says what it grades, not where it sits. A test or category may be placed under any ancestor in its
+  path (e.g. `<sd>/parser/lexer#tokens` straight under `<sd>/parser`, or under the definition). Chains of single-child
+  categories (`fr.epita.tests.LexerTest`) can thus be merged into one node, and the computation, which only looks tests
+  up by URI, does not care.
 
 The computation never parses a URI back: it builds the URI of every `<testcase>` in the trace and looks nodes up by
 it. The operator (building the tree) and `repo-grades` (computing) must build test URIs identically, through one shared
@@ -255,7 +277,7 @@ Consequences of the reference being the id:
 * **Ids are longer than UUIDs**, which weighs on report size.
 
 The invariants between references (unique URIs, each nested under its parent's, types following the hierarchy) are
-enforced by the validator, see `grading-system-scheme-validator.md`.
+enforced by the validator in `srvc-activity-operator`, see `grading-system-scheme-validator.md`.
 
 ### Ingested data
 
@@ -324,8 +346,21 @@ outdated when:
 
 **`FAILED`.** A failed computation still publishes a report, otherwise the operator never learns about it. Throwing in
 a Kafka consumer aborts the transaction and its outgoing messages, so the handler catches the failure, marks the report
-`FAILED` with an `errorCode` and publishes it without rethrowing. The report keeps the results of its last successful
+`FAILED` with an `error` and publishes it without rethrowing. The report keeps the results of its last successful
 computation.
+
+*(2026-10-30, team advice)* The error is a closed enum, not text, so the operator can switch on it, together with the
+node the computation failed on:
+
+| `error` | `errorNodeUri` | Cause |
+|----|----|----|
+| `TRACE_INACCESSIBLE` | the `SUBMISSION_DEF` | the trace could not be read from S3 (missing, or S3 down) |
+| `TRACE_MALFORMED` | the `SUBMISSION_DEF` | the trace is not valid JUnit XML |
+| `DUPLICATE_TEST_CASE` | the duplicated test's URI (may not be a node of the scheme) | two test cases of the trace share one URI |
+| `UNEXPECTED_ERROR` | null | anything else, e.g. a malformed tree, now that `repo-grades` no longer validates |
+
+`repo-grades` has no `ErrorCode` enum of its own: computation failures are a `GradeComputationException` carrying the
+aggregate's enum, and rejected commands are plain `IllegalArgumentException`/`IllegalStateException`, only logged.
 
 ### NodeResult
 
@@ -452,7 +487,8 @@ GradeReportAggregate:
   activityUri:     String
   groupSlug:       String
   status:          FRESH | STALE | FAILED
-  errorCode:       String?        // set when FAILED
+  error:           TRACE_INACCESSIBLE | TRACE_MALFORMED | DUPLICATE_TEST_CASE | UNEXPECTED_ERROR?  // set when FAILED
+  errorNodeUri:    String?        // node the failed computation stopped on, see FAILED
   computedAt:      ZonedDateTime  // last successful computation
   finalMax:        double
   finalGrade:      double         // adjustments not included

@@ -25,7 +25,7 @@ commands are run by the user, see [[reference_team_git_convention]]). 109 tests 
 - Key decisions made today, all in the docs: node id = URI of what it grades (no free grouping nodes); traces parsed
   live at computation, never stored; one report per (scheme, group); absence descends to an absent node's
   descendants; overrides re-run the calculator on stored results (`TestOutcomes.ofResults`) and are lost on
-  recomputation; scheme validation runs in the repo on reception AND in the operator before sending (team decision).
+  recomputation; scheme validation runs in the repo on reception AND in the operator before sending (team decision, REVERSED 2026-10-29: validation is operator-only now, the user handles moving it in a separate thread).
 
 **MR review fixes (2026-10-28, committed):** LAST now picks the most recent submission *with a current job*, like
 BEST (quota-rejected/errored/in-flight submissions are skipped instead of grading 0). `isCurrent` deliberately just
@@ -38,8 +38,10 @@ under the same trace key. `trace_etag` was added to V1 directly (app never deplo
 
 **Next piece of work: the srvc-activity-operator side** - build the initial tree, test discovery (with TestUris /
 testCasesByUri), REST endpoints (`LocalDocs/Endpoints.md` is now the operator endpoint spec, written before the pivot),
-consume the two aggregates, run the scheme validation before sending. Open question for the team first: move
-`GradingSchemeValidator` (depends only on exchange types) to a module both apps use.
+consume the two aggregates, run the scheme validation before sending. Settled 2026-10-29 in team meeting: validation lives only in the operator (no shared module).
+Endpoint redesign 2026-10-30: the operator DOES store discovered tests (ingested from traces) so the frontend can build
+the tree; sync endpoint dropped (frontend builds the tree, sends it whole); permissions = tenant perms + activity
+managers, like the pre-pivot srvc-grades AccessService (commit c4bb2bfab, branch 44-srvc-grades-new-app-backup).
 
 **User finds this design area hard to hold in their head** and has said so. When picking it back up, lead with a short
 global view (the one formula `score = points x ratio`, what lives where) before any detail.
@@ -48,6 +50,13 @@ Related: [[feedback_comment_style]], [[feedback_confirm_edits]], [[feedback_spec
 [[reference_framework_kafka_transactions]], [[project_hibernate_persist_ordering_gotcha]],
 [[project_testcontainers_docker_api_version]], [[project_maven_build_cache_gotcha]],
 [[project_stale_target_resources]], [[reference_intranet_uri_convention]], [[reference_frontend_backend_comm]].
+
+**2026-10-30:** validator removed from repo-grades (commit 1b451cd, recover with `git show 1b451cd^:<path>`);
+nested test categories implemented in framework-trace `TestUris` (dotted classname = nested categories, test name after
+`#`, blank classname = test under the definition, empty parts skipped), committed. Then GradeReportAggregate.error enum
+(TRACE_INACCESSIBLE/TRACE_MALFORMED/DUPLICATE_TEST_CASE/UNEXPECTED_ERROR) + errorNodeUri, GradesErrorCodes deleted
+(rejections are plain IllegalArgument/IllegalState exceptions; failures a GradeComputationException); awaiting commit. Then operator work (endpoints list agreed in
+session: default-tree discovery endpoint, POST/DELETE discovered tests, compute batches with progress polling).
 
 **Why:** a future session on this branch or the operator follow-up needs the current state without re-reading history.
 **How to apply:** start from this and the two LocalDocs design docs; update it as the operator work progresses, and
