@@ -1,0 +1,1 @@
+- [Stacked dev shell](project_stacked_devshell.md) — repo flake + dotfiles flake via .envrc; where each tool comes from
